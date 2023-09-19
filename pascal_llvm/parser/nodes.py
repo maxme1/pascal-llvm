@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import NamedTuple, Any
 
-from .. import types
+from ..type_system import types
 
 
 class ParseError(Exception):
@@ -13,12 +13,23 @@ class Const(NamedTuple):
     type: types.DataType
 
 
-class Name(NamedTuple):
+class Name:
     name: str
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __repr__(self):
+        return f'<Name {self.name}>'
+
+
+class GetItem(NamedTuple):
+    name: Name
+    args: tuple[Any]
 
 
 class Assignment(NamedTuple):
-    target: Any
+    target: Name | GetItem
     value: Any
 
 
@@ -34,59 +45,62 @@ class Binary(NamedTuple):
 
 
 class Call(NamedTuple):
-    name: str
-    args: list[Any]
-
-
-class GetItem(NamedTuple):
-    name: str
-    args: list[Any]
+    name: Name
+    args: tuple[Any]
 
 
 class Definitions(NamedTuple):
-    names: list[str]
+    names: tuple[Name]
     type: types.DataType
+
+
+class ExpressionStatement(NamedTuple):
+    value: Any
 
 
 class If(NamedTuple):
     condition: Any
-    then_: list[Any]
-    else_: list[Any]
+    then_: tuple[Any]
+    else_: tuple[Any]
 
 
 class While(NamedTuple):
     condition: Any
-    body: list[Any]
+    body: tuple[Any]
 
 
 class For(NamedTuple):
-    name: str
+    name: Name
     start: Any
     stop: Any
-    body: list[Any]
+    body: tuple[Any]
 
 
 class ArgDefinition(NamedTuple):
-    name: str
+    name: Name
     mutable: bool
     type: types.DataType
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class Procedure:
-    name: str
-    args: list[ArgDefinition]
-    variables: list[Definitions]
-    body: list[Any]
-
-
-@dataclass
-class Function(Procedure):
+    name: Name
+    args: tuple[ArgDefinition]
+    variables: tuple[Definitions]
+    body: tuple[Any]
     return_type: types.DataType
+
+    @property
+    def signature(self):
+        return types.Signature(tuple(x.type for x in self.args), self.return_type)
+
+
+@dataclass(unsafe_hash=True)
+class Function(Procedure):
+    pass
 
 
 class Program(NamedTuple):
-    name: str
-    variables: list[Definitions]
-    subroutines: list[Function | Procedure]
-    body: list[Any]
+    variables: tuple[Definitions]
+    subroutines: tuple[Function | Procedure]
+    body: tuple[Any]

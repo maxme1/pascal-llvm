@@ -1,18 +1,23 @@
 from llvmlite import ir
 
-from . import types
-from .parser import Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Procedure, Function
+from .type_system import types, TypeSystem
+from .parser import (
+    Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Procedure, Function,
+    ExpressionStatement
+)
 from .visitor import Visitor
 
 
 class Compiler(Visitor):
     @classmethod
     def compile(cls, root):
-        compiler = cls()
+        ts = TypeSystem()
+        ts.visit(root)
+        compiler = cls(ts)
         compiler.visit(root)
         return compiler.module
 
-    def __init__(self):
+    def __init__(self, ts: TypeSystem):
         self.module = ir.Module()
 
         # external and builtins
@@ -20,13 +25,21 @@ class Compiler(Visitor):
         self._writeln()
 
         self._builders = []
-        self._scopes = []
-        # FIXME: an ugly crutch for now
-        self._func_return_names = []
+        self._cast = ts.casting
+        self._types = ts.types
+        self._references = ts.references
+        self._allocas = {}
+        self._names = {ts._writeln: 'WRITELN'}
 
     @property
     def _builder(self) -> ir.IRBuilder:
         return self._builders[-1]
+
+    def _deduplicate(self, node: Procedure):
+        if node not in self._names:
+            # TODO: pretify
+            self._names[node] = f'{len(self._names)}.{node.name.name}'
+        return self._names[node]
 
     def _writeln(self):
         func = ir.Function(self.module, ir.FunctionType(ir.VoidType(), [ir.IntType(32)]), 'WRITELN')
@@ -43,62 +56,67 @@ class Compiler(Visitor):
         builder.call(self.module.get_global('printf'), [pointer, *func.args])
         builder.ret_void()
 
+    # typing
+
+    def after_visit(self, node, value):
+        if node in self._cast:
+            value = self._builder.sitofp(value, resolve(self._cast[node]))
+        return value
+
     # scope utils
 
-    def _resolve(self, name):
-        return self._scopes[-1][name]
+    def _access(self, name: Name):
+        return self._builder.load(self._allocas[self._references[name]])
 
-    def _store(self, name, value):
-        self._builder.store(value, self._resolve(name))
+    def _assign(self, name: Name, value):
+        self._builder.store(value, self._allocas[self._references[name]])
 
-    def _load(self, name):
-        return self._builder.load(self._resolve(name))
-
-    def _allocate(self, name, kind):
-        # TODO: duplicates
-        self._scopes[-1][name] = self._builder.alloca(kind)
+    def _allocate(self, name: Name, kind: ir.Type):
+        self._allocas[name] = self._builder.alloca(kind, name=name.name)
 
     # scope modification
 
     def _assignment(self, node: Assignment):
+        target = node.target
         value = self.visit(node.value)
-        match node.target:
-            case Name(name):
-                if self._func_return_names and name == self._func_return_names[-1]:
-                    name = f'.{name}'
-                self._store(name, value)
-            case GetItem(name, args):
-                assert len(args) == 1
-                ptr = self._builder.gep(self._resolve(name), [ir.Constant(ir.IntType(32), 0), self.visit(args[0])])
-                return self._builder.store(value, ptr)
-            case default:
-                raise TypeError(default)
+        if isinstance(target, Name):
+            self._assign(target, value)
+        else:
+            assert isinstance(target, GetItem)
+            assert len(target.args) == 1
+            ptr = self._builder.gep(
+                self._access(target.name), [ir.Constant(ir.IntType(32), 0), self.visit(target.args[0])]
+            )
+            self._builder.store(value, ptr)
 
     def _program(self, node: Program):
         main = ir.Function(self.module, ir.FunctionType(ir.VoidType(), ()), '.main')
         self._builders.append(ir.IRBuilder(main.append_basic_block()))
-        self._scopes.append({})
 
         for definitions in node.variables:
             for name in definitions.names:
                 self._allocate(name, resolve(definitions.type))
 
-        for subroutine in node.subroutines:
-            self.visit(subroutine)
+        for func in node.subroutines:
+            ir.Function(
+                self.module, ir.FunctionType(resolve(func.return_type), [resolve(arg.type) for arg in func.args]),
+                self._deduplicate(func),
+            )
 
+        self.visit_sequence(node.subroutines)
         self.visit_sequence(node.body)
         self._builder.ret_void()
 
         self._builders.pop()
-        self._scopes.pop()
 
     def _subroutine(self, func, node: Procedure):
-        for f_arg, node_arg in zip(func.args, node.args, strict=True):
+        for arg, param in zip(func.args, node.args, strict=True):
             # TODO
             # assert not node_arg.mutable, node_arg
-            name = f_arg.name = node_arg.name
-            self._allocate(name, resolve(node_arg.type))
-            self._store(name, f_arg)
+            name = param.name
+            arg.name = name.name
+            self._allocate(name, resolve(param.type))
+            self._builder.store(arg, self._allocas[name])
 
         for definitions in node.variables:
             for name in definitions.names:
@@ -107,38 +125,26 @@ class Compiler(Visitor):
         self.visit_sequence(node.body)
 
     def _function(self, node: Function):
-        return_type = resolve(node.return_type)
-        func = ir.Function(
-            self.module, ir.FunctionType(return_type, [resolve(arg.type) for arg in node.args]), node.name
-        )
+        name = node.name
+        func = self.module.get_global(self._deduplicate(node))
         # TODO: util
         self._builders.append(ir.IRBuilder(func.append_basic_block()))
-        self._scopes.append({})
 
-        ret_name = f'.{node.name}'
-        self._func_return_names.append(node.name)
-        self._allocate(ret_name, return_type)
-
+        self._allocate(name, resolve(node.return_type))
         self._subroutine(func, node)
-        self._builder.ret(self._load(ret_name))
+        self._builder.ret(self._builder.load(self._allocas[name]))
 
-        self._func_return_names.pop()
         self._builders.pop()
-        self._scopes.pop()
 
     def _procedure(self, node: Procedure):
-        func = ir.Function(
-            self.module, ir.FunctionType(ir.VoidType(), [resolve(arg.type) for arg in node.args]), node.name
-        )
+        func = self.module.get_global(self._deduplicate(node))
         # TODO: util
         self._builders.append(ir.IRBuilder(func.append_basic_block()))
-        self._scopes.append({})
 
         self._subroutine(func, node)
         self._builder.ret_void()
 
         self._builders.pop()
-        self._scopes.pop()
 
     # statements
 
@@ -183,7 +189,7 @@ class Compiler(Visitor):
         name = node.name
         start = self.visit(node.start)
         stop = self.visit(node.stop)
-        self._store(name, start)
+        self._assign(name, start)
 
         check_block = self._builder.append_basic_block('check')
         loop_block = self._builder.append_basic_block('for')
@@ -192,38 +198,64 @@ class Compiler(Visitor):
 
         # check
         self._builder.position_at_end(check_block)
-        condition = self._builder.icmp_signed('<=', self._load(name), stop, 'for-condition')
+        # TODO: type
+        condition = self._builder.icmp_signed('<=', self._access(name), stop, 'for-condition')
         self._builder.cbranch(condition, loop_block, end_block)
 
         # loop
         self._builder.position_at_end(loop_block)
         self.visit_sequence(node.body)
         # update
-        self._store(name, self._builder.add(self._load(name), ir.Constant(resolve(types.Integer), 1), 'increment'))
+        # TODO: type
+        self._assign(name, self._builder.add(self._access(name), ir.Constant(resolve(types.Integer), 1), 'increment'))
         self._builder.branch(check_block)
 
         # exit
         self._builder.position_at_end(end_block)
+
+    def _expression_statement(self, node: ExpressionStatement):
+        self.visit(node.value)
 
     # expressions
 
     def _binary(self, node: Binary):
         left = self.visit(node.left)
         right = self.visit(node.right)
-        # TODO: typing
-        match node.op:
-            case '+':
-                return self._builder.add(left, right)
-            case '-':
-                return self._builder.sub(left, right)
-            case '*':
-                return self._builder.mul(left, right)
-            case '<' | '<=' | '>' | '>=' as x:
-                return self._builder.icmp_signed(x, left, right)
-            case '=':
-                return self._builder.icmp_signed('==', left, right)
-            case x:
-                raise ValueError(x)
+        family = self._types[node].family
+
+        # TODO: simplify
+        match family:
+            case types.Ints:
+                match node.op:
+                    case '+':
+                        return self._builder.add(left, right)
+                    case '-':
+                        return self._builder.sub(left, right)
+                    case '*':
+                        return self._builder.mul(left, right)
+                    case '<' | '<=' | '>' | '>=' as x:
+                        return self._builder.icmp_signed(x, left, right)
+                    case '=':
+                        return self._builder.icmp_signed('==', left, right)
+                    case x:
+                        raise ValueError(x)
+            case types.Floats:
+                match node.op:
+                    case '+':
+                        return self._builder.fadd(left, right)
+                    case '-':
+                        return self._builder.fsub(left, right)
+                    case '*':
+                        return self._builder.fmul(left, right)
+                    case '<' | '<=' | '>' | '>=' as x:
+                        return self._builder.fcmp_ordered(x, left, right)
+                    case '=':
+                        return self._builder.fcmp_ordered('==', left, right)
+                    case x:
+                        raise ValueError(x)
+
+            case default:
+                raise TypeError(default)
 
     def _unary(self, node: Unary):
         value = self.visit(node.value)
@@ -235,16 +267,16 @@ class Compiler(Visitor):
                 raise ValueError(x)
 
     def _call(self, node: Call):
-        func = self.module.get_global(node.name)
+        func = self.module.get_global(self._deduplicate(self._references[node.name]))
         return self._builder.call(func, tuple(map(self.visit, node.args)))
 
     def _get_item(self, node: GetItem):
         assert len(node.args) == 1
-        ptr = self._builder.gep(self._resolve(node.name), [ir.Constant(ir.IntType(32), 0), self.visit(node.args[0])])
+        ptr = self._builder.gep(self._access(node.name), [ir.Constant(ir.IntType(32), 0), self.visit(node.args[0])])
         return self._builder.load(ptr)
 
     def _name(self, node: Name):
-        return self._load(node.name)
+        return self._access(node)
 
     @staticmethod
     def _const(node: Const):
@@ -255,10 +287,15 @@ def resolve(kind):
     return TypeResolver().visit(kind)
 
 
+# TODO: remove the hardcoded 32
 class TypeResolver(Visitor):
     @staticmethod
     def _integer(value):
         return ir.IntType(32)
+
+    @staticmethod
+    def _real(value):
+        return ir.FloatType()
 
     def _array(self, value: types.Array):
         dims = value.dims
