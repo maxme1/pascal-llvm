@@ -13,10 +13,9 @@ source = Path(sys.argv[1]).read_text()
 # compile
 tokens = tokenize(source)
 program = parse(tokens)
-compiler = Compiler()
-compiler.visit(program)
+module = Compiler.compile(program)
 # translate
-module = llvm.parse_assembly(str(compiler.module))
+module = llvm.parse_assembly(str(module))
 module.verify()
 # run
 llvm.initialize()

@@ -1,11 +1,17 @@
 from llvmlite import ir
 
 from . import types
-from .parser import Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While
+from .parser import Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Procedure, Function
 from .visitor import Visitor
 
 
 class Compiler(Visitor):
+    @classmethod
+    def compile(cls, root):
+        compiler = cls()
+        compiler.visit(root)
+        return compiler.module
+
     def __init__(self):
         self.module = ir.Module()
 
@@ -15,6 +21,8 @@ class Compiler(Visitor):
 
         self._builders = []
         self._scopes = []
+        # FIXME: an ugly crutch for now
+        self._func_return_names = []
 
     @property
     def _builder(self) -> ir.IRBuilder:
@@ -35,6 +43,8 @@ class Compiler(Visitor):
         builder.call(self.module.get_global('printf'), [pointer, *func.args])
         builder.ret_void()
 
+    # scope utils
+
     def _resolve(self, name):
         return self._scopes[-1][name]
 
@@ -44,10 +54,18 @@ class Compiler(Visitor):
     def _load(self, name):
         return self._builder.load(self._resolve(name))
 
+    def _allocate(self, name, kind):
+        # TODO: duplicates
+        self._scopes[-1][name] = self._builder.alloca(kind)
+
+    # scope modification
+
     def _assignment(self, node: Assignment):
         value = self.visit(node.value)
         match node.target:
             case Name(name):
+                if self._func_return_names and name == self._func_return_names[-1]:
+                    name = f'.{name}'
                 self._store(name, value)
             case GetItem(name, args):
                 assert len(args) == 1
@@ -56,9 +74,6 @@ class Compiler(Visitor):
             case default:
                 raise TypeError(default)
 
-    def _name(self, node: Name):
-        return self._load(node.name)
-
     def _program(self, node: Program):
         main = ir.Function(self.module, ir.FunctionType(ir.VoidType(), ()), '.main')
         self._builders.append(ir.IRBuilder(main.append_basic_block()))
@@ -66,10 +81,60 @@ class Compiler(Visitor):
 
         for definitions in node.variables:
             for name in definitions.names:
-                # TODO: duplicates
-                self._scopes[-1][name] = self._builder.alloca(resolve(definitions.type))
+                self._allocate(name, resolve(definitions.type))
+
+        for subroutine in node.subroutines:
+            self.visit(subroutine)
 
         self.visit_sequence(node.body)
+        self._builder.ret_void()
+
+        self._builders.pop()
+        self._scopes.pop()
+
+    def _subroutine(self, func, node: Procedure):
+        for f_arg, node_arg in zip(func.args, node.args, strict=True):
+            # TODO
+            # assert not node_arg.mutable, node_arg
+            name = f_arg.name = node_arg.name
+            self._allocate(name, resolve(node_arg.type))
+            self._store(name, f_arg)
+
+        for definitions in node.variables:
+            for name in definitions.names:
+                self._allocate(name, resolve(definitions.type))
+
+        self.visit_sequence(node.body)
+
+    def _function(self, node: Function):
+        return_type = resolve(node.return_type)
+        func = ir.Function(
+            self.module, ir.FunctionType(return_type, [resolve(arg.type) for arg in node.args]), node.name
+        )
+        # TODO: util
+        self._builders.append(ir.IRBuilder(func.append_basic_block()))
+        self._scopes.append({})
+
+        ret_name = f'.{node.name}'
+        self._func_return_names.append(node.name)
+        self._allocate(ret_name, return_type)
+
+        self._subroutine(func, node)
+        self._builder.ret(self._load(ret_name))
+
+        self._func_return_names.pop()
+        self._builders.pop()
+        self._scopes.pop()
+
+    def _procedure(self, node: Procedure):
+        func = ir.Function(
+            self.module, ir.FunctionType(ir.VoidType(), [resolve(arg.type) for arg in node.args]), node.name
+        )
+        # TODO: util
+        self._builders.append(ir.IRBuilder(func.append_basic_block()))
+        self._scopes.append({})
+
+        self._subroutine(func, node)
         self._builder.ret_void()
 
         self._builders.pop()
@@ -155,6 +220,8 @@ class Compiler(Visitor):
                 return self._builder.mul(left, right)
             case '<' | '<=' | '>' | '>=' as x:
                 return self._builder.icmp_signed(x, left, right)
+            case '=':
+                return self._builder.icmp_signed('==', left, right)
             case x:
                 raise ValueError(x)
 
@@ -176,9 +243,11 @@ class Compiler(Visitor):
         ptr = self._builder.gep(self._resolve(node.name), [ir.Constant(ir.IntType(32), 0), self.visit(node.args[0])])
         return self._builder.load(ptr)
 
-    def _const(self, node: Const):
-        # TODO
-        assert node.type == types.Integer
+    def _name(self, node: Name):
+        return self._load(node.name)
+
+    @staticmethod
+    def _const(node: Const):
         return ir.Constant(resolve(node.type), node.value)
 
 
@@ -187,7 +256,8 @@ def resolve(kind):
 
 
 class TypeResolver(Visitor):
-    def _integer(self, value):
+    @staticmethod
+    def _integer(value):
         return ir.IntType(32)
 
     def _array(self, value: types.Array):

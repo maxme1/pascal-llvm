@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import NamedTuple, Any
 
 from .. import types
@@ -65,7 +66,27 @@ class For(NamedTuple):
     body: list[Any]
 
 
+class ArgDefinition(NamedTuple):
+    name: str
+    mutable: bool
+    type: types.DataType
+
+
+@dataclass
+class Procedure:
+    name: str
+    args: list[ArgDefinition]
+    variables: list[Definitions]
+    body: list[Any]
+
+
+@dataclass
+class Function(Procedure):
+    return_type: types.DataType
+
+
 class Program(NamedTuple):
     name: str
     variables: list[Definitions]
+    subroutines: list[Function | Procedure]
     body: list[Any]

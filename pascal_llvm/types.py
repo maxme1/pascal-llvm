@@ -17,14 +17,14 @@ class Integer(DataType):
     pass
 
 
-# @instance
-# class String(DataType):
-#     pass
-#
-#
-# @instance
-# class Real(DataType):
-#     pass
+@instance
+class String(DataType):
+    pass
+
+
+@instance
+class Real(DataType):
+    pass
 
 
 @dataclass

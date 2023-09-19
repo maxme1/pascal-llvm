@@ -1,5 +1,6 @@
 from tokenize import TokenInfo
 
+from jboc import collect
 from more_itertools import peekable
 
 from ..tokenizer import TokenType
@@ -17,24 +18,75 @@ class Parser:
     def _program(self):
         self.consume(TokenType.NAME, string='PROGRAM')
         name = self.consume(TokenType.NAME).string
+        if self.matches(TokenType.LPAR):
+            self.consume()
+            self.consume(TokenType.NAME)
+            self.consume(TokenType.RPAR)
+
         self.consume(TokenType.SEMI)
 
-        variables = []
-        if self.matches(TokenType.NAME, string='VAR'):
-            self.consume()
-            while not self.matches(TokenType.NAME, string='BEGIN'):
-                variables.append(self._definition())
+        variables = self._variables()
+        subroutines = []
+        while self.peek().string in ['FUNCTION', 'PROCEDURE']:
+            subroutines.append(self._subroutine())
 
         statements = self._body()
 
         self.consume(TokenType.DOT)
-        return Program(name, variables, statements)
+        return Program(name, variables, subroutines, statements)
+
+    @collect
+    def _variables(self):
+        while self.matches(TokenType.NAME, string='VAR'):
+            self.consume()
+            yield self._definition()
+
+    def _subroutine(self):
+        if self.matches(TokenType.NAME, string='FUNCTION'):
+            self.consume()
+            cls = Function
+        else:
+            self.consume(TokenType.NAME, string='PROCEDURE')
+            cls = Procedure
+
+        name = self.consume(TokenType.NAME).string
+
+        args = []
+        self.consume(TokenType.LPAR)
+        while not self.matches(TokenType.RPAR):
+            mutable = self.matches(TokenType.NAME, string='VAR')
+            if mutable:
+                self.consume()
+            arg = self.consume(TokenType.NAME).string
+            self.consume(TokenType.COLON)
+            kind = self._type()
+            args.append(ArgDefinition(arg, mutable, kind))
+            if self.matches(TokenType.COMMA):
+                self.consume()
+
+        self.consume(TokenType.RPAR)
+
+        if cls is Function:
+            self.consume(TokenType.COLON)
+            ret = self._type()
+        self.consume(TokenType.SEMI)
+
+        variables = self._variables()
+        body = self._body()
+        self.consume(TokenType.SEMI)
+        # FIXME
+        if cls is Function:
+            return cls(name, args, variables, body, ret)
+        return cls(name, args, variables, body)
 
     def _body(self):
         statements = []
         self.consume(TokenType.NAME, string='BEGIN')
-        while not self.matches(string='END'):
+        while not self.matches(TokenType.NAME, string='END'):
             statements.append(self._statement())
+            # the semicolon is optional in the last statement
+            if not self.matches(TokenType.NAME, string='END'):
+                self.consume(TokenType.SEMI)
         self.consume(TokenType.NAME, string='END')
         return statements
 
@@ -83,20 +135,23 @@ class Parser:
         if isinstance(value, (Name, GetItem)) and self.matches(TokenType.COLONEQUAL):
             self.consume()
             value = Assignment(value, self._expression())
-        self.consume(TokenType.SEMI)
         return value
+
+    def _flexible_body(self):
+        if self.matches(TokenType.NAME, string='BEGIN'):
+            return self._body()
+        return [self._statement()]
 
     def _if(self):
         self.consume(TokenType.NAME, string='IF')
         condition = self._expression()
         self.consume(TokenType.NAME, string='THEN')
-        left = self._body()
+        left = self._flexible_body()
         if self.matches(TokenType.NAME, string='ELSE'):
             self.consume()
-            right = self._body()
+            right = self._flexible_body()
         else:
             right = []
-        self.consume(TokenType.SEMI)
         return If(condition, left, right)
 
     def _while(self):
@@ -104,7 +159,6 @@ class Parser:
         condition = self._expression()
         self.consume(TokenType.NAME, string='DO')
         body = self._body()
-        self.consume(TokenType.SEMI)
         return While(condition, body)
 
     def _for(self):
@@ -116,7 +170,6 @@ class Parser:
         stop = self._expression()
         self.consume(TokenType.NAME, string='DO')
         body = self._body()
-        self.consume(TokenType.SEMI)
         return For(name, start, stop, body)
 
     def _expression(self):
@@ -149,12 +202,12 @@ class Parser:
         match self.peek().type:
             case TokenType.NUMBER:
                 body = self.consume().string
-                # if '.' in body:
-                #     return Const(float(body), types.Real)
+                if '.' in body:
+                    return Const(float(body), types.Real)
                 return Const(int(body), types.Integer)
 
-            # case TokenType.STRING:
-            #     return Const(self.consume().string, types.String)
+            case TokenType.STRING:
+                return Const(self.consume().string, types.String)
 
             case TokenType.LPAR:
                 self.consume()
