@@ -5,7 +5,7 @@ from . import types
 from ..visitor import Visitor
 from ..parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
-    ExpressionStatement, ArgDefinition
+    ExpressionStatement, ArgDefinition, GetField
 )
 
 
@@ -41,6 +41,10 @@ class TypeSystem(Visitor):
         if isinstance(to, types.Reference):
             if self.can_cast(kind, to.type):
                 return 1
+            return 0
+
+        # FIXME
+        if not hasattr(kind, 'family') or not hasattr(to, 'family'):
             return 0
 
         family = kind.family
@@ -99,19 +103,8 @@ class TypeSystem(Visitor):
     # scope modification
 
     def _assignment(self, node: Assignment):
-        target = node.target
-        if isinstance(target, GetItem):
-            kind = self._item(target)
-        else:
-            assert isinstance(target, Name)
-            if self._func_return_names and target.name == self._func_return_names[-1][0].name:
-                # assignment to the function's name inside a function is definition of a return value
-                ref, kind = self._func_return_names[-1]
-                self.references[target] = ref
-            else:
-                kind = self._resolve_value(target)
-
-        self.visit(node.value, kind)
+        kind = self.visit(node.target, expected=None, lvalue=True)
+        self.visit(node.value, expected=kind, lvalue=False)
 
     def _program(self, node: Program):
         with self._new_scope():
@@ -149,12 +142,12 @@ class TypeSystem(Visitor):
     # statements
 
     def _if(self, node: If):
-        self.visit(node.condition, types.Boolean)
+        self.visit(node.condition, expected=types.Boolean, lvalue=False)
         self.visit_sequence(node.then_)
         self.visit_sequence(node.else_)
 
     def _while(self, node: While):
-        self.visit(node.condition, types.Boolean)
+        self.visit(node.condition, expected=types.Boolean, lvalue=False)
         self.visit_sequence(node.body)
 
     def _for(self, node: For):
@@ -162,16 +155,16 @@ class TypeSystem(Visitor):
         if counter not in types.Ints:
             raise WrongType(counter)
 
-        self.visit(node.start, counter)
-        self.visit(node.stop, counter)
+        self.visit(node.start, expected=counter, lvalue=False)
+        self.visit(node.stop, expected=counter, lvalue=False)
         self.visit_sequence(node.body)
 
     def _expression_statement(self, node: ExpressionStatement):
-        self.visit(node.value, None)
+        self.visit(node.value, expected=None, lvalue=False)
 
     # expressions
 
-    def _binary(self, node: Binary, expected: types.DataType):
+    def _binary(self, node: Binary, expected: types.DataType, lvalue: bool):
         signatures = [
             types.Signature([x, x], x)
             for x in [types.Integer, types.Real]
@@ -182,7 +175,7 @@ class TypeSystem(Visitor):
     def _unary(self, node: Unary, expected: types.DataType):
         return self.visit(node.value, expected)
 
-    def _call(self, node: Call, expected: types.DataType):
+    def _call(self, node: Call, expected: types.DataType, lvalue: bool):
         # get all the functions with this name
         target = self._resolve_function(node.name)
         if not isinstance(target, types.Function):
@@ -205,7 +198,7 @@ class TypeSystem(Visitor):
                     if isinstance(kind, types.Reference) and not isinstance(arg, Name):
                         raise WrongType('Only variables can be mutable arguments')
 
-                    actual = self.visit(arg, kind)
+                    actual = self.visit(arg, expected=kind, lvalue=False)
                     self.cast(arg, actual, kind)
 
             except WrongType:
@@ -215,26 +208,46 @@ class TypeSystem(Visitor):
 
         raise WrongType(args, expected, signatures)
 
-    def _get_item(self, node: GetItem, expected: types.DataType):
-        return self._item(node)
-
-    def _item(self, node: GetItem):
-        # get the value and remember the choice
-        target = self._resolve_value(node.name)
+    def _get_item(self, node: GetItem, expected: types.DataType, lvalue: bool):
+        target = self.visit(node.target, expected=None, lvalue=True)
+        if isinstance(target, types.Reference):
+            target = target.type
         if not isinstance(target, types.Array):
             raise WrongType(target)
         if len(node.args) != len(target.dims):
             raise WrongType(target, node.args)
         # TODO
-        node.args = self.visit_sequence(node.args, types.Integer)
-        if not all(x in types.Ints for x in node.args):
+        args = self.visit_sequence(node.args, expected=types.Integer, lvalue=lvalue)
+        if not all(x in types.Ints for x in args):
             raise WrongType(node.args)
 
         return target.type
 
-    def _name(self, node: Name, expected: types.DataType):
+    def _get_field(self, node: GetField, expected: types.DataType, lvalue: bool):
+        target = self.visit(node.target, expected=None, lvalue=True)
+        if isinstance(target, types.Reference):
+            target = target.type
+        if not isinstance(target, types.Record):
+            raise WrongType(target)
+
+        for field in target.fields:
+            if field.name == node.name:
+                return field.type
+
+        raise WrongType(target, node.name)
+
+    def _name(self, node: Name, expected: types.DataType, lvalue: bool):
+        # assignment to the function's name inside a function is definition of a return value
+        if (
+                lvalue and self._func_return_names and
+                self._func_return_names[-1][0] and node.name == self._func_return_names[-1][0].name
+        ):
+            ref, kind = self._func_return_names[-1]
+            self.references[node] = ref
+            return kind
+
         return self._resolve_value(node)
 
     @staticmethod
-    def _const(node: Const, expected: types.DataType):
+    def _const(node: Const, expected: types.DataType, lvalue: bool):
         return node.type

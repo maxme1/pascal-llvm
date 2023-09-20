@@ -1,3 +1,4 @@
+import types
 from tokenize import TokenInfo
 
 from jboc import composed
@@ -41,7 +42,7 @@ class Parser:
     @composed(tuple)
     def _variables(self):
         while self.consumed(TokenType.NAME, string='var'):
-            while self.peek().string.lower() not in ('var', 'function', 'procedure', 'external'):
+            while self.peek().string.lower() not in ('var', 'function', 'procedure', 'external', 'begin'):
                 yield self._definition()
 
     def _prototype(self):
@@ -112,6 +113,14 @@ class Parser:
             internal = self._type()
             return types.Array(tuple(dims), internal)
 
+        if self.consumed(TokenType.NAME, string='record'):
+            fields = []
+            while not self.consumed(TokenType.NAME, string='end'):
+                definition = self._definition()
+                for name in definition.names:
+                    fields.append(types.Field(name.name, definition.type))
+            return types.Record(tuple(fields))
+
         # if self.consumed(TokenType.NAME, string='string'):
         kind = self.consume(TokenType.NAME).string.lower()
         return types.dispatch(kind)
@@ -125,7 +134,7 @@ class Parser:
             return self._while()
 
         value = self._expression()
-        if isinstance(value, (Name, GetItem)) and self.consumed(TokenType.COLONEQUAL):
+        if isinstance(value, (Name, GetItem, GetField)) and self.consumed(TokenType.COLONEQUAL):
             value = Assignment(value, self._expression())
         else:
             value = ExpressionStatement(value)
@@ -192,6 +201,26 @@ class Parser:
         return self._tail()
 
     def _tail(self):
+        target = self._primary()
+        while self.matches(TokenType.LSQB, TokenType.DOT):
+            match self.consume().type:
+                case TokenType.LSQB:
+                    args = [self._expression()]
+                    while self.matches(TokenType.COMMA):
+                        self.consume()
+                        args.append(self._expression())
+                    self.consume(TokenType.RSQB)
+                    target = GetItem(target, tuple(args))
+
+                case TokenType.DOT:
+                    # TODO: find out what's this
+                    self.consume(TokenType.OP, string='')
+                    name = self.consume(TokenType.NAME).string
+                    target = GetField(target, name)
+
+        return target
+
+    def _primary(self):
         match self.peek().type:
             case TokenType.NUMBER:
                 body = self.consume().string
@@ -213,15 +242,6 @@ class Parser:
                 name = Name(self.consume().string)
                 if self.matches(TokenType.LPAR):
                     return Call(name, self._args())
-                if self.matches(TokenType.LSQB):
-                    self.consume()
-                    args = [self._expression()]
-                    while self.matches(TokenType.COMMA):
-                        self.consume()
-                        args.append(self._expression())
-                    self.consume(TokenType.RSQB)
-                    return GetItem(name, tuple(args))
-
                 return name
 
             case _:

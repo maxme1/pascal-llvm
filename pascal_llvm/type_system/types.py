@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Type, NamedTuple
+from typing import Type, NamedTuple
 
 
 def instance(family=None):
@@ -58,10 +58,20 @@ class Real(DataType):
     pass
 
 
-@dataclass
+@dataclass(unsafe_hash=True)
 class Array(DataType):
     dims: tuple[int]
-    type: Any
+    type: DataType
+
+
+class Field(NamedTuple):
+    name: str
+    type: DataType
+
+
+@dataclass(unsafe_hash=True, eq=True, frozen=True)
+class Record(DataType):
+    fields: tuple[Field]
 
 
 @dataclass(unsafe_hash=True)

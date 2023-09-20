@@ -3,7 +3,7 @@ from llvmlite import ir
 from .type_system import types, TypeSystem
 from .parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
-    ExpressionStatement
+    ExpressionStatement, GetField
 )
 from .visitor import Visitor
 
@@ -92,20 +92,12 @@ class Compiler(Visitor):
     # scope modification
 
     def _assignment(self, node: Assignment):
-        target = node.target
-        value = self.visit(node.value)
+        ptr = self.visit(node.target, lvalue=True)
+        value = self.visit(node.value, lvalue=False)
         if isinstance(self._types[node.value], types.Reference):
             value = self._builder.load(value)
 
-        if isinstance(target, Name):
-            self._assign(target, value)
-        else:
-            assert isinstance(target, GetItem)
-            assert len(target.args) == 1
-            ptr = self._builder.gep(
-                self._access(target.name), [ir.Constant(ir.IntType(32), 0), self.visit(target.args[0])]
-            )
-            self._builder.store(value, ptr)
+        self._builder.store(value, ptr)
 
     def _program(self, node: Program):
         main = ir.Function(self.module, ir.FunctionType(ir.VoidType(), ()), '.main')
@@ -221,13 +213,13 @@ class Compiler(Visitor):
         self._builder.position_at_end(end_block)
 
     def _expression_statement(self, node: ExpressionStatement):
-        self.visit(node.value)
+        self.visit(node.value, lvalue=False)
 
     # expressions
 
-    def _binary(self, node: Binary):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
+    def _binary(self, node: Binary, lvalue: bool):
+        left = self.visit(node.left, lvalue)
+        right = self.visit(node.right, lvalue)
         family = self._types[node].family
 
         # TODO: simplify
@@ -264,8 +256,8 @@ class Compiler(Visitor):
             case default:
                 raise TypeError(default)
 
-    def _unary(self, node: Unary):
-        value = self.visit(node.value)
+    def _unary(self, node: Unary, lvalue: bool):
+        value = self.visit(node.value, lvalue)
         # TODO: typing
         match node.op:
             case '-':
@@ -273,7 +265,7 @@ class Compiler(Visitor):
             case x:
                 raise ValueError(x)
 
-    def _call(self, node: Call):
+    def _call(self, node: Call, lvalue: bool):
         func = self.module.get_global(self._deduplicate(self._references[node.name]))
         signature = self._references[node.name].signature
 
@@ -283,21 +275,46 @@ class Compiler(Visitor):
                 assert isinstance(arg, Name)
                 value = self._allocas[self._references[arg]]
             else:
-                value = self.visit(arg)
+                value = self.visit(arg, False)
             args.append(value)
 
         return self._builder.call(func, args)
 
-    def _get_item(self, node: GetItem):
+    def _get_item(self, node: GetItem, lvalue: bool):
         assert len(node.args) == 1
-        ptr = self._builder.gep(self._access(node.name), [ir.Constant(ir.IntType(32), 0), self.visit(node.args[0])])
+        # we always want a pointer from the parent
+        ptr = self.visit(node.target, True)
+        ptr = self._builder.gep(
+            ptr, [ir.Constant(ir.IntType(32), 0), self.visit(node.args[0], False)]
+        )
+        if lvalue:
+            return ptr
         return self._builder.load(ptr)
 
-    def _name(self, node: Name):
-        return self._access(node)
+    def _get_field(self, node: GetField, lvalue: bool):
+        ptr = self.visit(node.target, True)
+        kind = self._types[node.target]
+        if isinstance(kind, types.Reference):
+            kind = kind.type
+        idx, = [i for i, field in enumerate(kind.fields) if field.name == node.name]
+        ptr = self._builder.gep(
+            ptr, [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), idx)]
+        )
+        if lvalue:
+            return ptr
+        return self._builder.load(ptr)
+
+    def _name(self, node: Name, lvalue: bool):
+        target = self._references[node]
+        ptr = self._allocas[target]
+        if lvalue:
+            if isinstance(self._types[target], types.Reference):
+                ptr = self._builder.load(ptr)
+            return ptr
+        return self._builder.load(ptr)
 
     @staticmethod
-    def _const(node: Const):
+    def _const(node: Const, lvalue: bool):
         return ir.Constant(resolve(node.type), node.value)
 
 
@@ -307,6 +324,10 @@ def resolve(kind):
 
 # TODO: remove the hardcoded 32
 class TypeResolver(Visitor):
+    @staticmethod
+    def _void(value):
+        return ir.VoidType()
+
     @staticmethod
     def _integer(value):
         return ir.IntType(32)
@@ -326,3 +347,6 @@ class TypeResolver(Visitor):
         dims = value.dims
         assert len(dims) == 1
         return ir.ArrayType(self.visit(value.type), dims[0])
+
+    def _record(self, value: types.Record):
+        return ir.LiteralStructType([self.visit(field.type) for field in value.fields])

@@ -17,8 +17,8 @@ class Visitor:
         return value
 
     def visit_sequence(self, nodes, *args, **kwargs):
-        for node in nodes:
-            self.visit(node, *args, **kwargs)
+        return tuple(self.visit(node, *args, **kwargs) for node in nodes)
+
 
     def after_visit(self, node, value):
         return value

@@ -24,12 +24,17 @@ class Name:
 
 
 class GetItem(NamedTuple):
-    name: Name
+    target: Any
     args: tuple[Any]
 
 
+class GetField(NamedTuple):
+    target: Any
+    name: str
+
+
 class Assignment(NamedTuple):
-    target: Name | GetItem
+    target: Name | GetItem | GetField
     value: Any
 
 
