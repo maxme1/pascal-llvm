@@ -90,8 +90,8 @@ def tokenize(text):
         if token.string in FIX_EXACT:
             token = token._replace(type=EXACT_TOKEN_TYPES[token.string])
         token = token._replace(type=TokenType(token.type))
-        if token.type != TokenType.STRING:
-            token = token._replace(string=token.string.upper())
+        # if token.type != TokenType.STRING:
+        #     token = token._replace(string=token.string.upper())
 
         # consume the comment
         if token.string == '//':

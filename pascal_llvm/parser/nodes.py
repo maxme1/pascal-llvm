@@ -78,12 +78,17 @@ class For(NamedTuple):
 
 class ArgDefinition(NamedTuple):
     name: Name
-    mutable: bool
     type: types.DataType
 
 
+class Prototype(NamedTuple):
+    name: Name
+    args: tuple[ArgDefinition]
+    return_type: types.DataType
+
+
 @dataclass(unsafe_hash=True)
-class Procedure:
+class Function:
     name: Name
     args: tuple[ArgDefinition]
     variables: tuple[Definitions]
@@ -95,12 +100,8 @@ class Procedure:
         return types.Signature(tuple(x.type for x in self.args), self.return_type)
 
 
-@dataclass(unsafe_hash=True)
-class Function(Procedure):
-    pass
-
-
 class Program(NamedTuple):
     variables: tuple[Definitions]
-    subroutines: tuple[Function | Procedure]
+    prototypes: tuple[Prototype]
+    functions: tuple[Function]
     body: tuple[Any]

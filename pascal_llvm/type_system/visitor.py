@@ -4,8 +4,8 @@ from typing import Sequence
 from . import types
 from ..visitor import Visitor
 from ..parser import (
-    Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Procedure, Function,
-    ExpressionStatement
+    Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
+    ExpressionStatement, ArgDefinition
 )
 
 
@@ -22,7 +22,7 @@ class TypeSystem(Visitor):
         self.casting = {}
         self.references = {}
         # FIXME
-        self._writeln = Name(Name('WRITELN'))
+        self._writeln = Function(Name('WRITELN'), (ArgDefinition(Name('x'), types.Integer),), (), (), types.Void)
 
     def after_visit(self, node, value):
         if value is not None:
@@ -33,6 +33,16 @@ class TypeSystem(Visitor):
     def can_cast(self, kind: types.DataType, to: types.DataType) -> int:
         if to is None or kind == to:
             return 2
+
+        if isinstance(kind, types.Reference):
+            if self.can_cast(kind.type, to):
+                return 1
+            return 0
+        if isinstance(to, types.Reference):
+            if self.can_cast(kind, to.type):
+                return 1
+            return 0
+
         family = kind.family
         if family == to.family:
             return int(family.index(kind) < family.index(to))
@@ -45,34 +55,36 @@ class TypeSystem(Visitor):
             case 0:
                 raise WrongType(kind, to)
             case 1:
-                self.casting[node] = to
+                self.casting[node] = kind, to
             case 2:
                 self.casting.pop(node, None)
 
     # scope utils
 
     def _resolve_function(self, name: Name):
-        return self._scopes[0][name.name]
+        return self._scopes[0][name.name.lower()]
 
     def _choose_signature(self, name: Name, signature):
-        self.references[name] = self._signatures[name.name, signature]
+        self.references[name] = self._signatures[name.name.lower(), signature]
 
-    def _store_signature(self, node: Procedure, signature):
+    def _store_signature(self, node: Function, signature):
         scope, = self._scopes
-        name = node.name.name
+        name = node.name.name.lower()
         if name not in scope:
             scope[name] = types.Function(())
-        scope[name] = types.Function((*scope[name].signatures, signature))
+        self.types[name] = scope[name] = types.Function((*scope[name].signatures, signature))
         self._signatures[name, signature] = node
 
     def _store_value(self, name: Name, kind: types.DataType):
         assert name not in self._scopes[-1]
-        self._scopes[-1][name.name] = name, kind
+        self._scopes[-1][name.name.lower()] = name, kind
+        self.types[name] = kind
 
     def _resolve_value(self, name: Name):
         for scope in reversed(self._scopes):
-            if name.name in scope:
-                node, kind = scope[name.name]
+            lower = name.name.lower()
+            if lower in scope:
+                node, kind = scope[lower]
                 self.references[name] = node
                 return kind
 
@@ -104,21 +116,25 @@ class TypeSystem(Visitor):
     def _program(self, node: Program):
         with self._new_scope():
             # FIXME
-            self._store_signature(self._writeln, types.Signature((types.Integer,), types.Void))
+            self._store_signature(self._writeln, self._writeln.signature)
 
             for definitions in node.variables:
                 for name in definitions.names:
                     self._store_value(name, definitions.type)
 
-            for func in node.subroutines:
+            for func in node.functions:
                 self._store_signature(func, func.signature)
 
-            self.visit_sequence(node.subroutines)
+            self.visit_sequence(node.functions)
             self.visit_sequence(node.body)
 
-    def _subroutine(self, node: Procedure, return_type):
+    def _function(self, node: Function):
         with self._new_scope():
-            self._func_return_names.append(return_type)
+            if node.return_type == types.Void:
+                self._func_return_names.append((None, None))
+            else:
+                self._func_return_names.append((node.name, node.return_type))
+                self.types[node.name] = node.return_type
 
             for arg in node.args:
                 self._store_value(arg.name, arg.type)
@@ -129,12 +145,6 @@ class TypeSystem(Visitor):
 
             self.visit_sequence(node.body)
             self._func_return_names.pop()
-
-    def _function(self, node: Function):
-        return self._subroutine(node, (node.name, node.return_type))
-
-    def _procedure(self, node: Procedure):
-        return self._subroutine(node, (None, None))
 
     # statements
 
@@ -192,6 +202,9 @@ class TypeSystem(Visitor):
 
             try:
                 for arg, kind in zip(args, signature.args, strict=True):
+                    if isinstance(kind, types.Reference) and not isinstance(arg, Name):
+                        raise WrongType('Only variables can be mutable arguments')
+
                     actual = self.visit(arg, kind)
                     self.cast(arg, actual, kind)
 

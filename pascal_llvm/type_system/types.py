@@ -62,3 +62,18 @@ class Real(DataType):
 class Array(DataType):
     dims: tuple[int]
     type: Any
+
+
+@dataclass(unsafe_hash=True)
+class Reference(DataType):
+    type: DataType
+
+
+def dispatch(name: str):
+    # TODO: smarter
+    kinds = {
+        'integer': Integer,
+        'string': String,
+        'real': Real,
+    }
+    return kinds[name]

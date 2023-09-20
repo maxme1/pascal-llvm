@@ -1,6 +1,6 @@
 from tokenize import TokenInfo
 
-from jboc import collect, composed
+from jboc import composed
 from more_itertools import peekable
 
 from ..tokenizer import TokenType
@@ -16,84 +16,84 @@ class Parser:
         self.tokens = peekable(tokens)
 
     def _program(self):
-        self.consume(TokenType.NAME, string='PROGRAM')
+        self.consume(TokenType.NAME, string='program')
         self.consume(TokenType.NAME)
-        if self.matches(TokenType.LPAR):
-            self.consume()
+        if self.consumed(TokenType.LPAR):
             self.consume(TokenType.NAME)
             self.consume(TokenType.RPAR)
 
         self.consume(TokenType.SEMI)
 
         variables = self._variables()
-        subroutines = []
-        while self.peek().string in ['FUNCTION', 'PROCEDURE']:
-            subroutines.append(self._subroutine())
+        functions, prototypes = [], []
+        while self.peek().string.lower() in ['function', 'procedure', 'external']:
+            if self.peek().string.lower() == 'external':
+                self.consume()
+                prototypes.append(self._prototype())
+            else:
+                functions.append(self._function())
 
-        subroutines = tuple(subroutines)
         statements = self._body()
 
         self.consume(TokenType.DOT)
-        return Program(variables, subroutines, statements)
+        return Program(variables, tuple(prototypes), tuple(functions), statements)
 
     @composed(tuple)
     def _variables(self):
-        while self.matches(TokenType.NAME, string='VAR'):
-            self.consume()
-            yield self._definition()
+        while self.consumed(TokenType.NAME, string='var'):
+            while self.peek().string.lower() not in ('var', 'function', 'procedure', 'external'):
+                yield self._definition()
 
-    def _subroutine(self):
-        if self.matches(TokenType.NAME, string='FUNCTION'):
-            self.consume()
-            cls = Function
-        else:
-            self.consume(TokenType.NAME, string='PROCEDURE')
-            cls = Procedure
+    def _prototype(self):
+        is_func = self.consumed(TokenType.NAME, string='function')
+        if not is_func:
+            self.consume(TokenType.NAME, string='procedure')
 
         name = Name(self.consume(TokenType.NAME).string)
 
         args = []
         self.consume(TokenType.LPAR)
         while not self.matches(TokenType.RPAR):
-            mutable = self.matches(TokenType.NAME, string='VAR')
-            if mutable:
-                self.consume()
+            mutable = self.consumed(TokenType.NAME, string='var')
             arg = self.consume(TokenType.NAME).string
             self.consume(TokenType.COLON)
             kind = self._type()
-            args.append(ArgDefinition(Name(arg), mutable, kind))
-            if self.matches(TokenType.COMMA):
-                self.consume()
+            if mutable:
+                kind = types.Reference(kind)
+            args.append(ArgDefinition(Name(arg), kind))
+            # TODO: potential problem
+            self.consumed(TokenType.COMMA)
 
-        args = tuple(args)
         self.consume(TokenType.RPAR)
 
-        if cls is Function:
+        if is_func:
             self.consume(TokenType.COLON)
             ret = self._type()
         else:
             ret = types.Void
         self.consume(TokenType.SEMI)
+        return Prototype(name, tuple(args), ret)
 
+    def _function(self):
+        proto = self._prototype()
         variables = self._variables()
         body = self._body()
         self.consume(TokenType.SEMI)
-        return cls(name, args, variables, body, ret)
+        return Function(proto.name, proto.args, variables, body, proto.return_type)
 
     @composed(tuple)
     def _body(self):
-        self.consume(TokenType.NAME, string='BEGIN')
-        while not self.matches(TokenType.NAME, string='END'):
+        self.consume(TokenType.NAME, string='begin')
+        while not self.matches(TokenType.NAME, string='end'):
             yield self._statement()
             # the semicolon is optional in the last statement
-            if not self.matches(TokenType.NAME, string='END'):
+            if not self.matches(TokenType.NAME, string='end'):
                 self.consume(TokenType.SEMI)
-        self.consume(TokenType.NAME, string='END')
+        self.consume(TokenType.NAME, string='end')
 
     def _definition(self):
         names = [Name(self.consume(TokenType.NAME).string)]
-        while self.matches(TokenType.COMMA):
-            self.consume()
+        while self.consumed(TokenType.COMMA):
             names.append(Name(self.consume(TokenType.NAME).string))
         self.consume(TokenType.COLON)
         kind = self._type()
@@ -101,64 +101,56 @@ class Parser:
         return Definitions(tuple(names), kind)
 
     def _type(self):
-        if self.matches(TokenType.NAME, string='ARRAY'):
-            self.consume()
-
+        if self.consumed(TokenType.NAME, string='array'):
             self.consume(TokenType.LSQB)
             dims = [int(self.consume(TokenType.NUMBER).string)]
-            while self.matches(TokenType.COMMA):
-                self.consume()
+            while self.consumed(TokenType.COMMA):
                 dims.append(int(self.consume(TokenType.NUMBER).string))
             self.consume(TokenType.RSQB)
 
-            self.consume(TokenType.NAME, string='OF')
+            self.consume(TokenType.NAME, string='of')
             internal = self._type()
             return types.Array(tuple(dims), internal)
 
+        # if self.consumed(TokenType.NAME, string='string'):
         kind = self.consume(TokenType.NAME).string.lower()
-        kinds = {
-            'integer': types.Integer,
-            'real': types.Real,
-        }
-        return kinds[kind]
+        return types.dispatch(kind)
 
     def _statement(self):
-        if self.matches(TokenType.NAME, string='IF'):
+        if self.matches(TokenType.NAME, string='if'):
             return self._if()
-        if self.matches(TokenType.NAME, string='FOR'):
+        if self.matches(TokenType.NAME, string='for'):
             return self._for()
-        if self.matches(TokenType.NAME, string='WHILE'):
+        if self.matches(TokenType.NAME, string='while'):
             return self._while()
 
         value = self._expression()
-        if isinstance(value, (Name, GetItem)) and self.matches(TokenType.COLONEQUAL):
-            self.consume()
+        if isinstance(value, (Name, GetItem)) and self.consumed(TokenType.COLONEQUAL):
             value = Assignment(value, self._expression())
         else:
             value = ExpressionStatement(value)
         return value
 
     def _flexible_body(self):
-        if self.matches(TokenType.NAME, string='BEGIN'):
+        if self.matches(TokenType.NAME, string='begin'):
             return self._body()
         return self._statement(),
 
     def _if(self):
-        self.consume(TokenType.NAME, string='IF')
+        self.consume(TokenType.NAME, string='if')
         condition = self._expression()
-        self.consume(TokenType.NAME, string='THEN')
+        self.consume(TokenType.NAME, string='then')
         left = self._flexible_body()
-        if self.matches(TokenType.NAME, string='ELSE'):
-            self.consume()
+        if self.consumed(TokenType.NAME, string='else'):
             right = self._flexible_body()
         else:
             right = ()
         return If(condition, left, right)
 
     def _while(self):
-        self.consume(TokenType.NAME, string='WHILE')
+        self.consume(TokenType.NAME, string='while')
         condition = self._expression()
-        self.consume(TokenType.NAME, string='DO')
+        self.consume(TokenType.NAME, string='do')
         body = self._body()
         return While(condition, body)
 
@@ -169,7 +161,7 @@ class Parser:
         start = self._expression()
         self.consume(TokenType.NAME, string='TO')
         stop = self._expression()
-        self.consume(TokenType.NAME, string='DO')
+        self.consume(TokenType.NAME, string='do')
         body = self._body()
         return For(name, start, stop, body)
 
@@ -217,7 +209,7 @@ class Parser:
                 return value
 
             case TokenType.NAME:
-                # TODO: keywords?
+                # TOdo: keywords?
                 name = Name(self.consume().string)
                 if self.matches(TokenType.LPAR):
                     return Call(name, self._args())
@@ -250,9 +242,15 @@ class Parser:
         if types and self.peek().type not in types:
             raise ParseError(self.peek(), types)
         token = next(self.tokens)
-        if string is not None and token.string != string:
+        if string is not None and token.string.lower() != string.lower():
             raise ParseError(token, string)
         return token
+
+    def consumed(self, *types: TokenType, string: str | None = None) -> bool:
+        success = self.matches(*types, string=string)
+        if success:
+            self.consume()
+        return success
 
     def peek(self) -> TokenInfo:
         if not self.tokens:
@@ -265,7 +263,7 @@ class Parser:
         token = self.peek()
         if types and token.type not in types:
             return False
-        if string is not None and token.string != string:
+        if string is not None and token.string.lower() != string.lower():
             return False
         return True
 
