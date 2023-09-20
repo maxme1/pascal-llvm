@@ -44,7 +44,7 @@ class TypeSystem(Visitor):
             return 0
 
         # FIXME
-        if not hasattr(kind, 'family') or not hasattr(to, 'family'):
+        if not getattr(kind, 'family', None) or not getattr(to, 'family', None):
             return 0
 
         family = kind.family
@@ -165,12 +165,23 @@ class TypeSystem(Visitor):
     # expressions
 
     def _binary(self, node: Binary, expected: types.DataType, lvalue: bool):
-        signatures = [
-            types.Signature([x, x], x)
-            for x in [types.Integer, types.Real]
-        ]
-
-        return self._dispatch([node.left, node.right], signatures, expected).return_type
+        # TODO: global
+        arithmetics = {
+            '+': [*types.Ints, *types.Floats, types.String],
+            '*': [*types.Ints, *types.Floats],
+        }
+        comparison = {
+            '=': [*types.Ints, *types.Floats, types.String],
+        }
+        signatures = {
+            k: [types.Signature([v, v], v) for v in vs]
+            for k, vs in arithmetics.items()
+        }
+        signatures.update({
+            k: [types.Signature([v, v], types.Boolean) for v in vs]
+            for k, vs in comparison.items()
+        })
+        return self._dispatch([node.left, node.right], signatures[node.op], expected).return_type
 
     def _unary(self, node: Unary, expected: types.DataType):
         return self.visit(node.value, expected)
