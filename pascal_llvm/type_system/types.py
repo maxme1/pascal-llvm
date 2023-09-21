@@ -44,6 +44,11 @@ class Boolean(DataType):
 
 
 @instance(Ints)
+class Char(DataType):
+    pass
+
+
+@instance(Ints)
 class Integer(DataType):
     pass
 
@@ -58,6 +63,11 @@ class Real(DataType):
     pass
 
 
+@dataclass(unsafe_hash=True, repr=True)
+class Pointer(DataType):
+    type: DataType
+
+
 @dataclass(unsafe_hash=True)
 class Array(DataType):
     dims: tuple[int]
@@ -69,7 +79,7 @@ class Field(NamedTuple):
     type: DataType
 
 
-@dataclass(unsafe_hash=True, eq=True, frozen=True)
+@dataclass(unsafe_hash=True, frozen=True)
 class Record(DataType):
     fields: tuple[Field]
 
@@ -85,5 +95,6 @@ def dispatch(name: str):
         'integer': Integer,
         'string': String,
         'real': Real,
+        'char': Char,
     }
     return kinds[name]

@@ -80,7 +80,7 @@ class TokenType(IntEnum):
     N_TOKENS = 64
 
 
-FIX_EXACT = ';', '(', ')', ',', ':', ':=', '[', ']'
+FIX_EXACT = ';', '(', ')', ',', ':', ':=', '[', ']', '^', '@', '|'
 
 
 def tokenize(text):

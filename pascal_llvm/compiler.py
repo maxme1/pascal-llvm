@@ -3,7 +3,7 @@ from llvmlite import ir
 from .type_system import types, TypeSystem
 from .parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
-    ExpressionStatement, GetField
+    ExpressionStatement, GetField, Dereference
 )
 from .visitor import Visitor
 
@@ -20,16 +20,26 @@ class Compiler(Visitor):
     def __init__(self, ts: TypeSystem):
         self.module = ir.Module()
 
-        # external and builtins
-        ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True), 'printf')
-        self._writeln()
-
         self._builders = []
         self._cast = ts.casting
         self._types = ts.types
         self._references = ts.references
         self._allocas = {}
-        self._names = {ts._writeln: 'WRITELN'}
+        self._names = {}
+
+        # external and builtins
+        ir.Function(self.module, ir.FunctionType(
+            ir.IntType(32), [ir.IntType(8).as_pointer()], True
+        ), 'printf')
+
+        for func in ts.prototypes:
+            name = func.name.name[1:]
+            self._names[func] = name
+            if name != 'printf':
+                signature = func.signature
+                ir.Function(self.module, ir.FunctionType(
+                    resolve(signature.return_type), list(map(resolve, signature.args))
+                ), name)
 
     @property
     def _builder(self) -> ir.IRBuilder:
@@ -68,8 +78,16 @@ class Compiler(Visitor):
                 src = src.type
                 value = self._builder.load(value)
 
-            if src != dst:
-                value = self._builder.sitofp(value, resolve(dst))
+            if src == dst:
+                return value
+
+            if src in types.Ints and dst in types.Floats:
+                return self._builder.sitofp(value, resolve(dst))
+
+            if src in types.Ints and dst in types.Ints:
+                return self._builder.sext(value, resolve(dst))
+
+            raise NotImplementedError(src, dst)
         return value
 
     # scope utils
@@ -257,6 +275,11 @@ class Compiler(Visitor):
                 raise TypeError(default)
 
     def _unary(self, node: Unary, lvalue: bool):
+        # getting the address is a special case
+        if node.op == '@':
+            # just get the name's address
+            return self.visit(node.value, lvalue=True)
+
         value = self.visit(node.value, lvalue)
         # TODO: typing
         match node.op:
@@ -304,6 +327,12 @@ class Compiler(Visitor):
             return ptr
         return self._builder.load(ptr)
 
+    def _dereference(self, node: Dereference, lvalue: bool):
+        ptr = self._builder.load(self.visit(node.target, True))
+        if lvalue:
+            return ptr
+        return self._builder.load(ptr)
+
     def _name(self, node: Name, lvalue: bool):
         target = self._references[node]
         ptr = self._allocas[target]
@@ -329,6 +358,10 @@ class TypeResolver(Visitor):
         return ir.VoidType()
 
     @staticmethod
+    def _char(value):
+        return ir.IntType(8)
+
+    @staticmethod
     def _integer(value):
         return ir.IntType(32)
 
@@ -350,3 +383,6 @@ class TypeResolver(Visitor):
 
     def _record(self, value: types.Record):
         return ir.LiteralStructType([self.visit(field.type) for field in value.fields])
+
+    def _pointer(self, value: types.Pointer):
+        return ir.PointerType(self.visit(value.type))

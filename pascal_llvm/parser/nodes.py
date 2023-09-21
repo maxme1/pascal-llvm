@@ -33,6 +33,10 @@ class GetField(NamedTuple):
     name: str
 
 
+class Dereference(NamedTuple):
+    target: Any
+
+
 class Assignment(NamedTuple):
     target: Name | GetItem | GetField
     value: Any

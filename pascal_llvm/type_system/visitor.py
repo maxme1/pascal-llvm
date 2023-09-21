@@ -5,7 +5,7 @@ from . import types
 from ..visitor import Visitor
 from ..parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
-    ExpressionStatement, ArgDefinition, GetField
+    ExpressionStatement, ArgDefinition, GetField, Dereference
 )
 
 
@@ -21,8 +21,15 @@ class TypeSystem(Visitor):
         self.types = {}
         self.casting = {}
         self.references = {}
-        # FIXME
-        self._writeln = Function(Name('WRITELN'), (ArgDefinition(Name('x'), types.Integer),), (), (), types.Void)
+
+        prototypes = [
+            ('|printf', [types.Pointer(types.Char), types.Integer], types.Integer),
+            ('|printf', [types.Pointer(types.Char), types.Real], types.Integer),
+        ]
+        self.prototypes = [
+            Function(Name(name), tuple(ArgDefinition(Name(str(i)), t) for i, t in enumerate(params)), (), (), ret)
+            for name, params, ret in prototypes
+        ]
 
     def after_visit(self, node, value):
         if value is not None:
@@ -109,7 +116,8 @@ class TypeSystem(Visitor):
     def _program(self, node: Program):
         with self._new_scope():
             # FIXME
-            self._store_signature(self._writeln, self._writeln.signature)
+            for func in self.prototypes:
+                self._store_signature(func, func.signature)
 
             for definitions in node.variables:
                 for name in definitions.names:
@@ -183,8 +191,13 @@ class TypeSystem(Visitor):
         })
         return self._dispatch([node.left, node.right], signatures[node.op], expected).return_type
 
-    def _unary(self, node: Unary, expected: types.DataType):
-        return self.visit(node.value, expected)
+    def _unary(self, node: Unary, expected: types.DataType, lvalue: bool):
+        if node.op == '@':
+            if not isinstance(expected, types.Pointer) or lvalue:
+                raise WrongType(node)
+            return types.Pointer(self.visit(node.value, expected=expected.type, lvalue=lvalue))
+
+        return self.visit(node.value, expected, lvalue)
 
     def _call(self, node: Call, expected: types.DataType, lvalue: bool):
         # get all the functions with this name
@@ -228,7 +241,7 @@ class TypeSystem(Visitor):
         if len(node.args) != len(target.dims):
             raise WrongType(target, node.args)
         # TODO
-        args = self.visit_sequence(node.args, expected=types.Integer, lvalue=lvalue)
+        args = self.visit_sequence(node.args, expected=types.Integer, lvalue=False)
         if not all(x in types.Ints for x in args):
             raise WrongType(node.args)
 
@@ -247,6 +260,11 @@ class TypeSystem(Visitor):
 
         raise WrongType(target, node.name)
 
+    def _dereference(self, node: Dereference, expected: types.DataType, lvalue: bool):
+        target = self.visit(node.target, expected, lvalue)
+        assert isinstance(target, types.Pointer)
+        return target.type
+
     def _name(self, node: Name, expected: types.DataType, lvalue: bool):
         # assignment to the function's name inside a function is definition of a return value
         if (
@@ -261,4 +279,6 @@ class TypeSystem(Visitor):
 
     @staticmethod
     def _const(node: Const, expected: types.DataType, lvalue: bool):
+        if lvalue:
+            raise WrongType(node)
         return node.type

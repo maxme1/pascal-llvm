@@ -102,6 +102,9 @@ class Parser:
         return Definitions(tuple(names), kind)
 
     def _type(self):
+        if self.consumed(TokenType.CIRCUMFLEX):
+            return types.Pointer(self._type())
+
         if self.consumed(TokenType.NAME, string='array'):
             self.consume(TokenType.LSQB)
             dims = [int(self.consume(TokenType.NUMBER).string)]
@@ -134,7 +137,7 @@ class Parser:
             return self._while()
 
         value = self._expression()
-        if isinstance(value, (Name, GetItem, GetField)) and self.consumed(TokenType.COLONEQUAL):
+        if isinstance(value, (Name, GetItem, GetField, Dereference)) and self.consumed(TokenType.COLONEQUAL):
             value = Assignment(value, self._expression())
         else:
             value = ExpressionStatement(value)
@@ -175,6 +178,12 @@ class Parser:
         return For(name, start, stop, body)
 
     def _expression(self):
+        # TODO: for now this will be the FFI
+        if self.consumed(TokenType.VBAR):
+            name = Name('|' + self.consume(TokenType.NAME).string)
+            args = self._args()
+            return Call(name, args)
+
         return self._binary(MAX_PRIORITY)
 
     def _binary(self, priority):
@@ -196,13 +205,13 @@ class Parser:
         return left
 
     def _unary(self):
-        if self.matches(TokenType.OP):
+        if self.matches(TokenType.OP, TokenType.AT):
             return Unary(self.consume().string, self._unary())
         return self._tail()
 
     def _tail(self):
         target = self._primary()
-        while self.matches(TokenType.LSQB, TokenType.DOT):
+        while self.matches(TokenType.LSQB, TokenType.DOT, TokenType.CIRCUMFLEX):
             match self.consume().type:
                 case TokenType.LSQB:
                     args = [self._expression()]
@@ -218,6 +227,9 @@ class Parser:
                     name = self.consume(TokenType.NAME).string
                     target = GetField(target, name)
 
+                case TokenType.CIRCUMFLEX:
+                    target = Dereference(target)
+
         return target
 
     def _primary(self):
@@ -226,7 +238,8 @@ class Parser:
                 body = self.consume().string
                 if '.' in body:
                     return Const(float(body), types.Real)
-                return Const(int(body), types.Integer)
+                # TODO: detect range
+                return Const(int(body), types.Char)
 
             case TokenType.STRING:
                 return Const(self.consume().string, types.String)
