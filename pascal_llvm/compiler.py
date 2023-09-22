@@ -26,7 +26,6 @@ class Compiler(Visitor):
 
         self._ts = ts
         self._desugar = ts.desugar
-        self._types = ts.types
         self._references = ts.references
         self._allocas = {}
         self._names = {}
@@ -71,7 +70,7 @@ class Compiler(Visitor):
     @composed(b' '.join)
     def _format_io(self, args):
         for arg in args:
-            match self._types[arg]:
+            match self._type(arg):
                 case types.SignedInt(_):
                     yield b'%d'
                 case types.Floating(_):
@@ -118,17 +117,14 @@ class Compiler(Visitor):
 
     # typing
 
-    def _final_type(self, node):
+    def _type(self, node):
         if node in self._ts.casting:
             return self._ts.casting[node][1]
-        return self._types[node]
+        return self._ts.types[node]
 
     def _cast(self, value, src: types.DataType, dst: types.DataType, lvalue: bool):
-        assert not isinstance(dst, types.Reference)
-        assert not (isinstance(src, types.Reference) and lvalue), lvalue
-
         # references are just fancy pointers
-        if isinstance(src, types.Reference):
+        if isinstance(src, types.Reference) and not lvalue:
             src = src.type
             value = self._builder.load(value)
 
@@ -160,7 +156,7 @@ class Compiler(Visitor):
     def _assign(self, name: Name, value):
         target = self._references[name]
         ptr = self._allocas[target]
-        if isinstance(self._types[target], types.Reference):
+        if isinstance(self._type(target), types.Reference):
             ptr = self._builder.load(ptr)
         self._builder.store(value, ptr)
 
@@ -179,7 +175,7 @@ class Compiler(Visitor):
     def _assignment(self, node: Assignment):
         ptr = self.visit(node.target, lvalue=True)
         value = self.visit(node.value, lvalue=False)
-        if isinstance(self._types[node.value], types.Reference):
+        if isinstance(self._type(node.value), types.Reference):
             value = self._builder.load(value)
 
         self._builder.store(value, ptr)
@@ -305,8 +301,8 @@ class Compiler(Visitor):
     def _binary(self, node: Binary, lvalue: bool):
         left = self.visit(node.left, lvalue)
         right = self.visit(node.right, lvalue)
-        kind = self._final_type(node.left)
-        assert kind == self._final_type(node.right), (kind, self._final_type(node.right))
+        kind = self._type(node.left)
+        assert kind == self._type(node.right), (kind, self._type(node.right))
 
         # TODO: simplify
         match kind:
@@ -391,12 +387,12 @@ class Compiler(Visitor):
         ptr = self.visit(node.target, True)
         # TODO: desugar this in the type system?
         stride = 1
-        dims = self._types[node.target].dims
+        dims = self._type(node.target).dims
         idx = ir.Constant(ir.IntType(32), 0)
         for (start, stop), arg in reversed(list(zip(dims, node.args, strict=True))):
             local = self.visit(arg, lvalue=False)
             # upcast to i32
-            local = self._cast(local, self._final_type(arg), types.Integer, False)
+            local = self._cast(local, self._type(arg), types.Integer, False)
             # extract the origin
             local = self._builder.sub(local, ir.Constant(ir.IntType(32), start))
             # multiply by stride
@@ -412,7 +408,7 @@ class Compiler(Visitor):
 
     def _get_field(self, node: GetField, lvalue: bool):
         ptr = self.visit(node.target, True)
-        kind = self._types[node.target]
+        kind = self._type(node.target)
         if isinstance(kind, types.Reference):
             kind = kind.type
         idx, = [i for i, field in enumerate(kind.fields) if field.name == node.name]
@@ -436,7 +432,7 @@ class Compiler(Visitor):
         target = self._references[node]
         ptr = self._allocas[target]
         if lvalue:
-            if isinstance(self._types[target], types.Reference):
+            if isinstance(self._type(target), types.Reference):
                 ptr = self._builder.load(ptr)
             return ptr
         return self._builder.load(ptr)
