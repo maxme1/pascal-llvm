@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Type, NamedTuple
 
 
+class WrongType(Exception):
+    pass
+
+
 def instance(v: Type[DataType]) -> DataType:
     return v()
 

@@ -145,7 +145,6 @@ class Parser:
                     fields.append(types.Field(name.name, definition.type))
             return types.Record(tuple(fields))
 
-        # if self.consumed(TokenType.NAME, string='string'):
         kind = self.consume(TokenType.NAME).string.lower()
         return types.dispatch(kind)
 
@@ -303,15 +302,16 @@ class Parser:
             case _:
                 raise ParseError(self.peek())
 
-    @composed(tuple)
     def _args(self):
+        args = []
         self.consume(TokenType.LPAR)
         while not self.matches(TokenType.RPAR):
-            yield self._expression()
-            if not self.matches(TokenType.RPAR):
+            if args:
                 self.consume(TokenType.COMMA)
+            args.append(self._expression())
 
         self.consume(TokenType.RPAR)
+        return tuple(args)
 
     # internals
     def consume(self, *types: TokenType, string: str | None = None) -> TokenInfo:

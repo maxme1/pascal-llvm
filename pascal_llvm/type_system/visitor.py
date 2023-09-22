@@ -2,27 +2,13 @@ from contextlib import contextmanager
 from typing import Sequence
 
 from . import types
+from .types import WrongType
+from .magic import MagicFunction
 from ..visitor import Visitor
 from ..parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
     ExpressionStatement, GetField, Dereference
 )
-
-
-class WrongType(Exception):
-    pass
-
-
-MAGIC_FUNCTIONS = {
-    'write': [None, types.Void],
-    'writeln': [None, types.Void],
-    'read': [None, types.Void],
-    'readln': [None, types.Void],
-    'random': [None, types.Integer],
-    'randomize': [[], types.Void],
-    'inc': [[types.Integer], types.Integer],
-    'chr': [[types.Integer], types.Char],
-}
 
 
 class TypeSystem(Visitor):
@@ -144,11 +130,11 @@ class TypeSystem(Visitor):
         self.visit(node.value, expected=kind, lvalue=False)
 
     def _program(self, node: Program):
-        with (self._new_scope()):
+        with self._new_scope():
             # FIXME
-            for func in MAGIC_FUNCTIONS:
-                func = Function(Name(func), (), (), (), types.Void)
-                self._store_signature(func, func.signature)
+            for func in MagicFunction.all():
+                func = Function(Name(func.name), None, None, None, None)
+                self._store_signature(func, None)
 
             for definitions in node.variables:
                 for name in definitions.names:
@@ -205,21 +191,22 @@ class TypeSystem(Visitor):
 
     def _binary(self, node: Binary, expected: types.DataType, lvalue: bool):
         # TODO: global
+        numeric = [*types.Ints, *types.Floats]
         homogeneous = {
-            '+': [*types.Ints, *types.Floats],
-            '*': [*types.Ints, *types.Floats],
-            '-': [*types.Ints, *types.Floats],
-            '/': [*types.Ints, *types.Floats],
+            '+': numeric,
+            '*': numeric,
+            '-': numeric,
+            '/': numeric,
             'and': [types.Boolean],
             'or': [types.Boolean],
         }
         boolean = {
-            '=': [*types.Ints, *types.Floats],
-            '<': [*types.Ints, *types.Floats],
-            '<=': [*types.Ints, *types.Floats],
-            '>': [*types.Ints, *types.Floats],
-            '>=': [*types.Ints, *types.Floats],
-            '<>': [*types.Ints, *types.Floats],
+            '=': numeric,
+            '<': numeric,
+            '<=': numeric,
+            '>': numeric,
+            '>=': numeric,
+            '<>': numeric,
         }
         signatures = {
             k: [types.Signature([v, v], v) for v in vs]
@@ -240,25 +227,14 @@ class TypeSystem(Visitor):
         return self.visit(node.value, expected, lvalue)
 
     def _call(self, node: Call, expected: types.DataType, lvalue: bool):
+        magic = MagicFunction.get(node.name.name)
+        if magic is not None:
+            return magic.validate(node.args, self.visit)
+
         # get all the functions with this name
         target = self._resolve_function(node.name)
         if not isinstance(target, types.Function):
             raise WrongType(target)
-
-        lower = node.name.name.lower()
-        if lower in MAGIC_FUNCTIONS:
-            args, kind = MAGIC_FUNCTIONS[lower]
-            if args is None:
-                self.visit_sequence(node.args, None, False)
-            else:
-                if len(args) != len(node.args):
-                    raise WrongType(args, node)
-                for ex, arg in zip(args, node.args, strict=True):
-                    self.visit(arg, ex, False)
-
-            if kind is None:
-                return expected
-            return kind
 
         signature = self._dispatch(node.args, target.signatures, expected)
         # choose the right function
