@@ -1,3 +1,7 @@
+from functools import reduce
+from operator import mul
+
+from jboc import composed
 from llvmlite import ir
 
 from .type_system import types, TypeSystem
@@ -5,41 +9,45 @@ from .parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
     ExpressionStatement, GetField, Dereference
 )
+from .type_system.visitor import MAGIC_FUNCTIONS
 from .visitor import Visitor
 
 
 class Compiler(Visitor):
     @classmethod
     def compile(cls, root):
-        ts = TypeSystem()
-        ts.visit(root)
-        compiler = cls(ts)
+        compiler = cls(TypeSystem.analyze(root))
         compiler.visit(root)
         return compiler.module
 
     def __init__(self, ts: TypeSystem):
         self.module = ir.Module()
-
         self._builders = []
-        self._cast = ts.casting
+
+        self._ts = ts
+        self._desugar = ts.desugar
         self._types = ts.types
         self._references = ts.references
         self._allocas = {}
         self._names = {}
 
         # external and builtins
-        ir.Function(self.module, ir.FunctionType(
-            ir.IntType(32), [ir.IntType(8).as_pointer()], True
-        ), 'printf')
+        ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True), 'printf')
+        ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True), 'scanf')
 
-        for func in ts.prototypes:
-            name = func.name.name[1:]
-            self._names[func] = name
-            if name != 'printf':
-                signature = func.signature
-                ir.Function(self.module, ir.FunctionType(
-                    resolve(signature.return_type), list(map(resolve, signature.args))
-                ), name)
+        # TODO: some of these functions can be defined in pascal
+        self._magic = {
+            'writeln': self._writeln,
+            'write': self._write,
+            'readln': self._readln,
+            'read': self._read,
+            'chr': self._chr,
+            'random': self._random,
+            'inc': self._inc,
+            # FIXME
+            'randomize': lambda: None,
+        }
+        self._string_idx = 0
 
     @property
     def _builder(self) -> ir.IRBuilder:
@@ -48,46 +56,100 @@ class Compiler(Visitor):
     def _deduplicate(self, node: Function):
         if node not in self._names:
             # TODO: pretify
-            self._names[node] = f'{len(self._names)}.{node.name.name}'
+            self._names[node] = f'function.{len(self._names)}.{node.name.name}'
         return self._names[node]
 
-    def _writeln(self):
-        func = ir.Function(self.module, ir.FunctionType(ir.VoidType(), [ir.IntType(32)]), 'WRITELN')
-        builder = ir.IRBuilder(func.append_basic_block())
+    def _string_pointer(self, value: bytes):
+        kind = ir.ArrayType(ir.IntType(8), len(value))
+        global_string = ir.GlobalVariable(self.module, kind, name=f'string.{self._string_idx}.global')
+        global_string.initializer = ir.Constant(kind, [ir.Constant(ir.IntType(8), x) for x in value])
+        self._string_idx += 1
+        return self._builder.gep(
+            global_string, [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), 0)]
+        )
 
-        fmt = b'%d\n\00'
-        local = builder.alloca(ir.ArrayType(ir.IntType(8), len(fmt)))
-        builder.store(ir.Constant(
-            ir.ArrayType(ir.IntType(8), len(fmt)),
-            [ir.Constant(ir.IntType(8), x) for x in fmt],
-        ), local)
-        pointer = builder.gep(local, [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), 0)])
+    @composed(b' '.join)
+    def _format_io(self, args):
+        for arg in args:
+            match self._types[arg]:
+                case types.SignedInt(_):
+                    yield b'%d'
+                case types.Floating(_):
+                    yield b'%f'
+                case types.Char:
+                    yield b'%c'
+                case types.StaticArray(dims, types.Char) if len(dims) == 1:
+                    yield b'%s'
+                case types.DynamicArray(types.Char):
+                    yield b'%s'
+                case kind:
+                    raise TypeError(kind)
 
-        builder.call(self.module.get_global('printf'), [pointer, *func.args])
-        builder.ret_void()
+    def _writeln(self, *args):
+        ptr = self._string_pointer(self._format_io(args) + b'\n\00')
+        return self._builder.call(self.module.get_global('printf'), [ptr, *self.visit_sequence(args, False)])
+
+    def _write(self, *args):
+        ptr = self._string_pointer(self._format_io(args) + b'\00')
+        return self._builder.call(self.module.get_global('printf'), [ptr, *self.visit_sequence(args, False)])
+
+    def _readln(self, *args):
+        ptr = self._string_pointer(self._format_io(args) + b'\n\00')
+        return self._builder.call(self.module.get_global('scanf'), [ptr, *self.visit_sequence(args, True)])
+
+    def _read(self, *args):
+        ptr = self._string_pointer(self._format_io(args) + b'\00')
+        return self._builder.call(self.module.get_global('scanf'), [ptr, *self.visit_sequence(args, True)])
+
+    def _chr(self, *args):
+        value, = args
+        return self._builder.trunc(self.visit(value, False), ir.IntType(8))
+
+    def _random(self, *args):
+        # FIXME
+        return ir.Constant(ir.IntType(32), 0)
+
+    def _inc(self, *args):
+        ptr, = args
+        ptr = self.visit(ptr, True)
+        # FIXME
+        value = self._builder.add(self._builder.load(ptr), ir.Constant(ir.IntType(32), 0))
+        self._builder.store(value, ptr)
 
     # typing
 
-    def after_visit(self, node, value):
-        if node in self._cast:
-            src, dst = self._cast[node]
-            assert not isinstance(dst, types.Reference)
+    def _final_type(self, node):
+        if node in self._ts.casting:
+            return self._ts.casting[node][1]
+        return self._types[node]
 
-            # references are just fancy pointers
-            if isinstance(src, types.Reference):
-                src = src.type
-                value = self._builder.load(value)
+    def _cast(self, value, src: types.DataType, dst: types.DataType, lvalue: bool):
+        assert not isinstance(dst, types.Reference)
+        assert not (isinstance(src, types.Reference) and lvalue), lvalue
 
-            if src == dst:
-                return value
+        # references are just fancy pointers
+        if isinstance(src, types.Reference):
+            src = src.type
+            value = self._builder.load(value)
 
-            if src in types.Ints and dst in types.Floats:
-                return self._builder.sitofp(value, resolve(dst))
+        if src == dst:
+            return value
 
-            if src in types.Ints and dst in types.Ints:
-                return self._builder.sext(value, resolve(dst))
+        if src in types.Ints and dst in types.Floats:
+            return self._builder.sitofp(value, resolve(dst))
 
-            raise NotImplementedError(src, dst)
+        if src in types.Ints and dst in types.Ints:
+            return self._builder.sext(value, resolve(dst))
+
+        if isinstance(src, types.StaticArray) and isinstance(dst, types.DynamicArray):
+            return value
+
+        raise NotImplementedError(value, src, dst)
+
+    def after_visit(self, node, value, lvalue=None):
+        if node in self._ts.casting:
+            assert lvalue is not None
+            return self._cast(value, *self._ts.casting[node], lvalue)
         return value
 
     # scope utils
@@ -107,6 +169,11 @@ class Compiler(Visitor):
         if initial is not None:
             self._builder.store(initial, self._allocas[name])
 
+    def _allocate_global(self, name: Name, kind: ir.Type):
+        var = ir.GlobalVariable(self.module, kind, name=name.name)
+        var.linkage = 'internal'
+        self._allocas[name] = var
+
     # scope modification
 
     def _assignment(self, node: Assignment):
@@ -123,7 +190,7 @@ class Compiler(Visitor):
 
         for definitions in node.variables:
             for name in definitions.names:
-                self._allocate(name, resolve(definitions.type))
+                self._allocate_global(name, resolve(definitions.type))
 
         for func in node.functions:
             ir.Function(
@@ -166,7 +233,7 @@ class Compiler(Visitor):
     # statements
 
     def _if(self, node: If):
-        condition = self.visit(node.condition)
+        condition = self.visit(node.condition, lvalue=False)
         then_block = self._builder.append_basic_block()
         else_block = self._builder.append_basic_block()
         merged_block = self._builder.append_basic_block()
@@ -191,7 +258,7 @@ class Compiler(Visitor):
 
         # check
         self._builder.position_at_end(check_block)
-        condition = self.visit(node.condition)
+        condition = self.visit(node.condition, False)
         self._builder.cbranch(condition, loop_block, end_block)
 
         # loop
@@ -204,8 +271,8 @@ class Compiler(Visitor):
 
     def _for(self, node: For):
         name = node.name
-        start = self.visit(node.start)
-        stop = self.visit(node.stop)
+        start = self.visit(node.start, lvalue=False)
+        stop = self.visit(node.stop, lvalue=False)
         self._assign(name, start)
 
         check_block = self._builder.append_basic_block('check')
@@ -238,11 +305,12 @@ class Compiler(Visitor):
     def _binary(self, node: Binary, lvalue: bool):
         left = self.visit(node.left, lvalue)
         right = self.visit(node.right, lvalue)
-        family = self._types[node].family
+        kind = self._final_type(node.left)
+        assert kind == self._final_type(node.right), (kind, self._final_type(node.right))
 
         # TODO: simplify
-        match family:
-            case types.Ints:
+        match kind:
+            case types.SignedInt(_):
                 match node.op:
                     case '+':
                         return self._builder.add(left, right)
@@ -254,9 +322,11 @@ class Compiler(Visitor):
                         return self._builder.icmp_signed(x, left, right)
                     case '=':
                         return self._builder.icmp_signed('==', left, right)
+                    case '<>':
+                        return self._builder.icmp_signed('!=', left, right)
                     case x:
                         raise ValueError(x)
-            case types.Floats:
+            case types.Floating(_):
                 match node.op:
                     case '+':
                         return self._builder.fadd(left, right)
@@ -271,8 +341,16 @@ class Compiler(Visitor):
                     case x:
                         raise ValueError(x)
 
-            case default:
-                raise TypeError(default)
+            case types.Boolean:
+                match node.op:
+                    case 'and':
+                        return self._builder.and_(left, right)
+                    case 'or':
+                        return self._builder.or_(left, right)
+                    case x:
+                        raise ValueError(x)
+            case _:
+                raise TypeError(node.op, kind)
 
     def _unary(self, node: Unary, lvalue: bool):
         # getting the address is a special case
@@ -286,9 +364,14 @@ class Compiler(Visitor):
             case '-':
                 return self._builder.neg(value)
             case x:
-                raise ValueError(x)
+                raise ValueError(x, node)
 
     def _call(self, node: Call, lvalue: bool):
+        # TODO: mb need a special node type for magic calls?
+        lower = node.name.name.lower()
+        if lower in MAGIC_FUNCTIONS:
+            return self._magic[lower](*node.args)
+
         func = self.module.get_global(self._deduplicate(self._references[node.name]))
         signature = self._references[node.name].signature
 
@@ -304,12 +387,25 @@ class Compiler(Visitor):
         return self._builder.call(func, args)
 
     def _get_item(self, node: GetItem, lvalue: bool):
-        assert len(node.args) == 1
         # we always want a pointer from the parent
         ptr = self.visit(node.target, True)
-        ptr = self._builder.gep(
-            ptr, [ir.Constant(ir.IntType(32), 0), self.visit(node.args[0], False)]
-        )
+        # TODO: desugar this in the type system?
+        stride = 1
+        dims = self._types[node.target].dims
+        idx = ir.Constant(ir.IntType(32), 0)
+        for (start, stop), arg in reversed(list(zip(dims, node.args, strict=True))):
+            local = self.visit(arg, lvalue=False)
+            # upcast to i32
+            local = self._cast(local, self._final_type(arg), types.Integer, False)
+            # extract the origin
+            local = self._builder.sub(local, ir.Constant(ir.IntType(32), start))
+            # multiply by stride
+            local = self._builder.mul(local, ir.Constant(ir.IntType(32), stride))
+            # add to index
+            idx = self._builder.add(idx, local)
+            stride *= stop - start
+
+        ptr = self._builder.gep(ptr, [ir.Constant(ir.IntType(32), 0), idx])
         if lvalue:
             return ptr
         return self._builder.load(ptr)
@@ -334,6 +430,9 @@ class Compiler(Visitor):
         return self._builder.load(ptr)
 
     def _name(self, node: Name, lvalue: bool):
+        if node in self._desugar:
+            return self.visit(self._desugar[node], lvalue)
+
         target = self._references[node]
         ptr = self._allocas[target]
         if lvalue:
@@ -342,47 +441,36 @@ class Compiler(Visitor):
             return ptr
         return self._builder.load(ptr)
 
-    @staticmethod
-    def _const(node: Const, lvalue: bool):
-        return ir.Constant(resolve(node.type), node.value)
+    def _const(self, node: Const, lvalue: bool):
+        # TODO: f32 doesn't work
+        kind = node.type
+        value = node.value
+        if isinstance(kind, types.StaticArray) and kind.type == types.Char:
+            return self._string_pointer(value)
+
+        if not isinstance(kind, (types.SignedInt, types.Floating)):
+            raise ValueError(value)
+
+        return ir.Constant(resolve(kind), value)
 
 
 def resolve(kind):
-    return TypeResolver().visit(kind)
+    match kind:
+        case types.Void:
+            return ir.VoidType()
+        case types.Char:
+            return ir.IntType(8)
+        case types.SignedInt(bits):
+            return ir.IntType(bits)
+        case types.Floating(bits):
+            assert bits == 64
+            return ir.DoubleType()
+        case types.Reference(kind) | types.Pointer(kind) | types.DynamicArray(kind):
+            return ir.PointerType(resolve(kind))
+        case types.StaticArray(dims, kind):
+            size = reduce(mul, [b - a for a, b in dims], 1)
+            return ir.ArrayType(resolve(kind), size)
+        case types.Record(fields):
+            return ir.LiteralStructType([resolve(field.type) for field in fields])
 
-
-# TODO: remove the hardcoded 32
-class TypeResolver(Visitor):
-    @staticmethod
-    def _void(value):
-        return ir.VoidType()
-
-    @staticmethod
-    def _char(value):
-        return ir.IntType(8)
-
-    @staticmethod
-    def _integer(value):
-        return ir.IntType(32)
-
-    @staticmethod
-    def _real(value):
-        return ir.FloatType()
-
-    @staticmethod
-    def _string(value):
-        return ir.ArrayType(ir.IntType(8))
-
-    def _reference(self, value: types.Reference):
-        return ir.PointerType(self.visit(value.type))
-
-    def _array(self, value: types.Array):
-        dims = value.dims
-        assert len(dims) == 1
-        return ir.ArrayType(self.visit(value.type), dims[0])
-
-    def _record(self, value: types.Record):
-        return ir.LiteralStructType([self.visit(field.type) for field in value.fields])
-
-    def _pointer(self, value: types.Pointer):
-        return ir.PointerType(self.visit(value.type))
+    raise ValueError(kind)

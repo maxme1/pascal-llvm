@@ -5,7 +5,7 @@ from . import types
 from ..visitor import Visitor
 from ..parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
-    ExpressionStatement, ArgDefinition, GetField, Dereference
+    ExpressionStatement, GetField, Dereference
 )
 
 
@@ -13,7 +13,28 @@ class WrongType(Exception):
     pass
 
 
+MAGIC_FUNCTIONS = {
+    'write': [None, types.Void],
+    'writeln': [None, types.Void],
+    'read': [None, types.Void],
+    'readln': [None, types.Void],
+    'random': [None, types.Integer],
+    'randomize': [[], types.Void],
+    'inc': [[types.Integer], types.Integer],
+    'chr': [[types.Integer], types.Char],
+}
+
+
 class TypeSystem(Visitor):
+    @classmethod
+    def analyze(cls, root):
+        self = cls()
+        self.visit(root)
+        for key, value in self.desugar.items():
+            assert value not in self.types
+            self.types[value] = self.types[key]
+        return self
+
     def __init__(self):
         self._scopes = []
         self._func_return_names = []
@@ -21,19 +42,13 @@ class TypeSystem(Visitor):
         self.types = {}
         self.casting = {}
         self.references = {}
+        self.desugar = {}
 
-        prototypes = [
-            ('|printf', [types.Pointer(types.Char), types.Integer], types.Integer),
-            ('|printf', [types.Pointer(types.Char), types.Real], types.Integer),
-        ]
-        self.prototypes = [
-            Function(Name(name), tuple(ArgDefinition(Name(str(i)), t) for i, t in enumerate(params)), (), (), ret)
-            for name, params, ret in prototypes
-        ]
-
-    def after_visit(self, node, value):
+    def after_visit(self, node, value, expected=None, lvalue=None):
         if value is not None:
             self.types[node] = value
+        if expected is not None:
+            self.cast(node, value, expected)
         return value
 
     # TODO: better way to return 3 states
@@ -41,17 +56,16 @@ class TypeSystem(Visitor):
         if to is None or kind == to:
             return 2
 
-        if isinstance(kind, types.Reference):
-            if self.can_cast(kind.type, to):
-                return 1
-            return 0
-        if isinstance(to, types.Reference):
-            if self.can_cast(kind, to.type):
-                return 1
-            return 0
+        match (kind, to):
+            case (types.Reference(src), _):
+                return bool(self.can_cast(src, to))
+            case (_, types.Reference(dst)):
+                return bool(self.can_cast(kind, dst))
+            case (types.StaticArray(dims, src), types.DynamicArray(dst)):
+                return bool(len(dims) == 1 and self.can_cast(src, dst))
 
         # FIXME
-        if not getattr(kind, 'family', None) or not getattr(to, 'family', None):
+        if not kind.family or not to.family:
             return 0
 
         family = kind.family
@@ -62,13 +76,20 @@ class TypeSystem(Visitor):
         return 0
 
     def cast(self, node, kind: types.DataType, to: types.DataType):
+        if node == Const(value=6, type=types.SignedInt(bits=8)):
+            print()
+
         match self.can_cast(kind, to):
-            case 0:
+            case 0 | False:
                 raise WrongType(kind, to)
-            case 1:
+            case 1 | True:
                 self.casting[node] = kind, to
+                return to
             case 2:
                 self.casting.pop(node, None)
+                return kind
+            case x:
+                raise ValueError(x)
 
     # scope utils
 
@@ -95,7 +116,12 @@ class TypeSystem(Visitor):
         for scope in reversed(self._scopes):
             lower = name.name.lower()
             if lower in scope:
-                node, kind = scope[lower]
+                value = scope[lower]
+                # func
+                if not isinstance(value, tuple):
+                    return value
+
+                node, kind = value
                 self.references[name] = node
                 return kind
 
@@ -111,12 +137,17 @@ class TypeSystem(Visitor):
 
     def _assignment(self, node: Assignment):
         kind = self.visit(node.target, expected=None, lvalue=True)
+        # no need to cast to reference in this case
+        if isinstance(kind, types.Reference):
+            kind = kind.type
+
         self.visit(node.value, expected=kind, lvalue=False)
 
     def _program(self, node: Program):
-        with self._new_scope():
+        with (self._new_scope()):
             # FIXME
-            for func in self.prototypes:
+            for func in MAGIC_FUNCTIONS:
+                func = Function(Name(func), (), (), (), types.Void)
                 self._store_signature(func, func.signature)
 
             for definitions in node.variables:
@@ -174,20 +205,29 @@ class TypeSystem(Visitor):
 
     def _binary(self, node: Binary, expected: types.DataType, lvalue: bool):
         # TODO: global
-        arithmetics = {
-            '+': [*types.Ints, *types.Floats, types.String],
+        homogeneous = {
+            '+': [*types.Ints, *types.Floats],
             '*': [*types.Ints, *types.Floats],
+            '-': [*types.Ints, *types.Floats],
+            '/': [*types.Ints, *types.Floats],
+            'and': [types.Boolean],
+            'or': [types.Boolean],
         }
-        comparison = {
-            '=': [*types.Ints, *types.Floats, types.String],
+        boolean = {
+            '=': [*types.Ints, *types.Floats],
+            '<': [*types.Ints, *types.Floats],
+            '<=': [*types.Ints, *types.Floats],
+            '>': [*types.Ints, *types.Floats],
+            '>=': [*types.Ints, *types.Floats],
+            '<>': [*types.Ints, *types.Floats],
         }
         signatures = {
             k: [types.Signature([v, v], v) for v in vs]
-            for k, vs in arithmetics.items()
+            for k, vs in homogeneous.items()
         }
         signatures.update({
             k: [types.Signature([v, v], types.Boolean) for v in vs]
-            for k, vs in comparison.items()
+            for k, vs in boolean.items()
         })
         return self._dispatch([node.left, node.right], signatures[node.op], expected).return_type
 
@@ -204,6 +244,21 @@ class TypeSystem(Visitor):
         target = self._resolve_function(node.name)
         if not isinstance(target, types.Function):
             raise WrongType(target)
+
+        lower = node.name.name.lower()
+        if lower in MAGIC_FUNCTIONS:
+            args, kind = MAGIC_FUNCTIONS[lower]
+            if args is None:
+                self.visit_sequence(node.args, None, False)
+            else:
+                if len(args) != len(node.args):
+                    raise WrongType(args, node)
+                for ex, arg in zip(args, node.args, strict=True):
+                    self.visit(arg, ex, False)
+
+            if kind is None:
+                return expected
+            return kind
 
         signature = self._dispatch(node.args, target.signatures, expected)
         # choose the right function
@@ -222,8 +277,7 @@ class TypeSystem(Visitor):
                     if isinstance(kind, types.Reference) and not isinstance(arg, Name):
                         raise WrongType('Only variables can be mutable arguments')
 
-                    actual = self.visit(arg, expected=kind, lvalue=False)
-                    self.cast(arg, actual, kind)
+                    self.visit(arg, expected=kind, lvalue=False)
 
             except WrongType:
                 continue
@@ -236,14 +290,14 @@ class TypeSystem(Visitor):
         target = self.visit(node.target, expected=None, lvalue=True)
         if isinstance(target, types.Reference):
             target = target.type
-        if not isinstance(target, types.Array):
+        if not isinstance(target, types.StaticArray):
             raise WrongType(target)
         if len(node.args) != len(target.dims):
             raise WrongType(target, node.args)
         # TODO
         args = self.visit_sequence(node.args, expected=types.Integer, lvalue=False)
-        if not all(x in types.Ints for x in args):
-            raise WrongType(node.args)
+        if not all(_unwrap(x) in types.Ints for x in args):
+            raise WrongType(node)
 
         return target.type
 
@@ -262,7 +316,8 @@ class TypeSystem(Visitor):
 
     def _dereference(self, node: Dereference, expected: types.DataType, lvalue: bool):
         target = self.visit(node.target, expected, lvalue)
-        assert isinstance(target, types.Pointer)
+        if not isinstance(target, types.Pointer):
+            raise WrongType(target)
         return target.type
 
     def _name(self, node: Name, expected: types.DataType, lvalue: bool):
@@ -275,10 +330,20 @@ class TypeSystem(Visitor):
             self.references[node] = ref
             return kind
 
-        return self._resolve_value(node)
+        reference = self._resolve_value(node)
+        if isinstance(reference, types.Function):
+            self.desugar[node] = new = Call(node, ())
+            return self._call(new, expected, lvalue)
+        return reference
 
     @staticmethod
     def _const(node: Const, expected: types.DataType, lvalue: bool):
         if lvalue:
             raise WrongType(node)
         return node.type
+
+
+def _unwrap(x):
+    if isinstance(x, types.Reference):
+        return x.type
+    return x

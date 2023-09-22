@@ -84,14 +84,17 @@ FIX_EXACT = ';', '(', ')', ',', ':', ':=', '[', ']', '^', '@', '|'
 
 
 def tokenize(text):
-    tokens = peekable(tknz.tokenize((x.encode() for x in text.splitlines() if x).__next__))
+    def generator():
+        for x in text.splitlines():
+            x = x.strip() or '//empty'
+            yield x
+
+    tokens = peekable(tknz.generate_tokens(generator().__next__))
     while tokens:
         token: tknz.TokenInfo = next(tokens)
         if token.string in FIX_EXACT:
             token = token._replace(type=EXACT_TOKEN_TYPES[token.string])
         token = token._replace(type=TokenType(token.type))
-        # if token.type != TokenType.STRING:
-        #     token = token._replace(string=token.string.upper())
 
         # consume the comment
         if token.string == '//':
@@ -102,11 +105,19 @@ def tokenize(text):
 
         # and the multiline comment
         elif token.string == '{':
-            try:
-                while next(tokens).string != '}':
-                    pass
-            except StopIteration:
-                raise TokenError
+            nesting = 1
+
+            while nesting > 0:
+                while token.string != '}':
+                    if token.string == '{':
+                        nesting += 1
+
+                    try:
+                        token = next(tokens)
+                    except StopIteration:
+                        raise TokenError
+
+                nesting -= 1
 
         # and irrelevant stuff
         elif token.type in (
@@ -115,7 +126,7 @@ def tokenize(text):
             pass
 
         # unpack floats
-        elif token.type == tknz.NUMBER and token.string.startswith('.') or token.string.endswith('.'):
+        elif token.type == TokenType.NUMBER and token.string.startswith('.') or token.string.endswith('.'):
             body = token.string
             split = (
                 token._replace(string='.', type=TokenType.DOT),
@@ -125,6 +136,12 @@ def tokenize(text):
                 yield from split
             else:
                 yield from split[::-1]
+
+        # fix the `<>` operator
+        elif token.string == '<' and tokens and tokens[0].string == '>':
+            # consume the second half
+            next(tokens)
+            yield token._replace(string='<>')
 
         else:
             yield token

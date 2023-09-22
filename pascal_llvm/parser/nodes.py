@@ -8,19 +8,18 @@ class ParseError(Exception):
     pass
 
 
-class Const(NamedTuple):
+unique = dataclass(eq=False)
+
+
+@unique
+class Const:
     value: Any
     type: types.DataType
 
 
+@unique
 class Name:
     name: str
-
-    def __init__(self, name: str):
-        self.name = name
-
-    def __repr__(self):
-        return f'<Name {self.name}>'
 
 
 class GetItem(NamedTuple):

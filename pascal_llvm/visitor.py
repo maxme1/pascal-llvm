@@ -13,12 +13,11 @@ def snake_case(name):
 class Visitor:
     def visit(self, node, *args, **kwargs):
         value = getattr(self, f'_{snake_case(type(node).__name__)}')(node, *args, **kwargs)
-        value = self.after_visit(node, value)
+        value = self.after_visit(node, value, *args, **kwargs)
         return value
 
     def visit_sequence(self, nodes, *args, **kwargs):
         return tuple(self.visit(node, *args, **kwargs) for node in nodes)
 
-
-    def after_visit(self, node, value):
+    def after_visit(self, node, value, *args, **kwargs):
         return value

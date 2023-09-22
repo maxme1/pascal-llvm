@@ -53,19 +53,21 @@ class Parser:
         name = Name(self.consume(TokenType.NAME).string)
 
         args = []
-        self.consume(TokenType.LPAR)
-        while not self.matches(TokenType.RPAR):
-            mutable = self.consumed(TokenType.NAME, string='var')
-            arg = self.consume(TokenType.NAME).string
-            self.consume(TokenType.COLON)
-            kind = self._type()
-            if mutable:
-                kind = types.Reference(kind)
-            args.append(ArgDefinition(Name(arg), kind))
-            # TODO: potential problem
-            self.consumed(TokenType.COMMA)
+        if self.consumed(TokenType.LPAR):
+            while not self.matches(TokenType.RPAR):
+                mutable = self.consumed(TokenType.NAME, string='var')
+                group = [Name(self.consume(TokenType.NAME).string)]
+                while self.consumed(TokenType.COMMA):
+                    group.append(Name(self.consume(TokenType.NAME).string))
+                self.consume(TokenType.COLON)
+                kind = self._type()
+                if mutable:
+                    kind = types.Reference(kind)
+                args.extend(ArgDefinition(x, kind) for x in group)
+                # TODO: potential problem
+                self.consumed(TokenType.COMMA, TokenType.SEMI)
 
-        self.consume(TokenType.RPAR)
+            self.consume(TokenType.RPAR)
 
         if is_func:
             self.consume(TokenType.COLON)
@@ -86,7 +88,11 @@ class Parser:
     def _body(self):
         self.consume(TokenType.NAME, string='begin')
         while not self.matches(TokenType.NAME, string='end'):
-            yield self._statement()
+            if self.matches(TokenType.NAME, string='begin'):
+                # TODO: is this ok?
+                yield from self._body()
+            else:
+                yield self._statement()
             # the semicolon is optional in the last statement
             if not self.matches(TokenType.NAME, string='end'):
                 self.consume(TokenType.SEMI)
@@ -106,15 +112,30 @@ class Parser:
             return types.Pointer(self._type())
 
         if self.consumed(TokenType.NAME, string='array'):
-            self.consume(TokenType.LSQB)
-            dims = [int(self.consume(TokenType.NUMBER).string)]
-            while self.consumed(TokenType.COMMA):
-                dims.append(int(self.consume(TokenType.NUMBER).string))
-            self.consume(TokenType.RSQB)
+            if self.consumed(TokenType.LSQB):
+                # true array
+                dims = [self._array_dims()]
+                while self.consumed(TokenType.COMMA):
+                    dims.append(self._array_dims())
+                self.consume(TokenType.RSQB)
 
+                self.consume(TokenType.NAME, string='of')
+                internal = self._type()
+                return types.StaticArray(tuple(dims), internal)
+
+            # just a pointer
             self.consume(TokenType.NAME, string='of')
             internal = self._type()
-            return types.Array(tuple(dims), internal)
+            return types.DynamicArray(internal)
+
+        # string is just a special case of an array
+        if self.consumed(TokenType.NAME, string='string'):
+            if self.consumed(TokenType.LSQB):
+                dims = self._array_dims(),
+                self.consume(TokenType.RSQB)
+                return types.StaticArray(dims, types.Char)
+
+            return types.DynamicArray(types.Char)
 
         if self.consumed(TokenType.NAME, string='record'):
             fields = []
@@ -127,6 +148,20 @@ class Parser:
         # if self.consumed(TokenType.NAME, string='string'):
         kind = self.consume(TokenType.NAME).string.lower()
         return types.dispatch(kind)
+
+    def _int(self):
+        neg = self.consumed(TokenType.OP, string='-')
+        value = int(self.consume(TokenType.NUMBER).string)
+        if neg:
+            return -value
+        return value
+
+    def _array_dims(self):
+        first = self._int()
+        if self.consumed(TokenType.DOT):
+            self.consume(TokenType.DOT)
+            return first, self._int()
+        return 0, first
 
     def _statement(self):
         if self.matches(TokenType.NAME, string='if'):
@@ -163,7 +198,7 @@ class Parser:
         self.consume(TokenType.NAME, string='while')
         condition = self._expression()
         self.consume(TokenType.NAME, string='do')
-        body = self._body()
+        body = self._flexible_body()
         return While(condition, body)
 
     def _for(self):
@@ -174,7 +209,7 @@ class Parser:
         self.consume(TokenType.NAME, string='TO')
         stop = self._expression()
         self.consume(TokenType.NAME, string='do')
-        body = self._body()
+        body = self._flexible_body()
         return For(name, start, stop, body)
 
     def _expression(self):
@@ -191,7 +226,7 @@ class Parser:
             return self._unary()
 
         left = self._binary(priority - 1)
-        while self.matches(TokenType.OP):
+        while self.matches(TokenType.OP, TokenType.NAME) and self.peek().string in PRIORITIES:
             op = self.peek().string
             current = PRIORITIES.get(op)
             # only consume the operation with the same priority
@@ -205,7 +240,8 @@ class Parser:
         return left
 
     def _unary(self):
-        if self.matches(TokenType.OP, TokenType.AT):
+        # FIXME
+        if self.peek().string in ('@', 'not', '-'):
             return Unary(self.consume().string, self._unary())
         return self._tail()
 
@@ -236,13 +272,20 @@ class Parser:
         match self.peek().type:
             case TokenType.NUMBER:
                 body = self.consume().string
-                if '.' in body:
-                    return Const(float(body), types.Real)
-                # TODO: detect range
-                return Const(int(body), types.Char)
+                if '.' not in body:
+                    value = int(body)
+                    for kind in types.Ints:
+                        if value.bit_length() < kind.bits:
+                            return Const(value, kind)
+
+                return Const(float(body), types.Real)
 
             case TokenType.STRING:
-                return Const(self.consume().string, types.String)
+                value = self.consume().string
+                if not value.startswith("'"):
+                    raise ParseError('Strings must start and end with apostrophes')
+                value = eval(value).encode() + b'\00'
+                return Const(value, types.StaticArray(((0, len(value)),), types.Char))
 
             case TokenType.LPAR:
                 self.consume()
@@ -263,10 +306,10 @@ class Parser:
     @composed(tuple)
     def _args(self):
         self.consume(TokenType.LPAR)
-        while self.peek().type != TokenType.RPAR:
+        while not self.matches(TokenType.RPAR):
             yield self._expression()
-            if self.peek().type == TokenType.COMMA:
-                self.consume()
+            if not self.matches(TokenType.RPAR):
+                self.consume(TokenType.COMMA)
 
         self.consume(TokenType.RPAR)
 
@@ -304,13 +347,18 @@ class Parser:
 PRIORITIES = {
     '*': 1,
     '/': 1,
+    'div': 1,
+    'mod': 1,
+    'and': 1,
     '+': 2,
     '-': 2,
+    'or': 2,
     '>': 3,
     '>=': 3,
     '<=': 3,
     '<': 3,
     '=': 4,
     '<>': 4,
+    'in': 4,
 }
 MAX_PRIORITY = max(PRIORITIES.values())

@@ -4,26 +4,19 @@ from dataclasses import dataclass
 from typing import Type, NamedTuple
 
 
-def instance(family=None):
-    def decorator(v: Type[DataType]) -> DataType:
-        v = v()
-        if family is not None:
-            family.append(v)
-        v.family = family
-        return v
-
-    return decorator
+def instance(v: Type[DataType]) -> DataType:
+    return v()
 
 
 class DataType:
-    family: list | None
+    @property
+    def family(self) -> tuple | None:
+        for family in Ints, Floats:
+            if self in family:
+                return family
 
 
-Ints = []
-Floats = []
-
-
-@instance()
+@instance
 class Void(DataType):
     pass
 
@@ -38,29 +31,29 @@ class Function(DataType):
     signatures: tuple[Signature]
 
 
-@instance()
+@instance
 class Boolean(DataType):
     pass
 
 
-@instance(Ints)
+@instance
 class Char(DataType):
     pass
 
 
-@instance(Ints)
-class Integer(DataType):
-    pass
+@dataclass(unsafe_hash=True)
+class SignedInt(DataType):
+    bits: int
 
 
-@instance()
-class String(DataType):
-    pass
+@dataclass(unsafe_hash=True)
+class Floating(DataType):
+    bits: int
 
 
-@instance(Floats)
-class Real(DataType):
-    pass
+# TODO: 32 and 64 is not always true
+Ints = Byte, Integer = SignedInt(8), SignedInt(32)
+Floats = Real, = Floating(64),
 
 
 @dataclass(unsafe_hash=True, repr=True)
@@ -69,8 +62,13 @@ class Pointer(DataType):
 
 
 @dataclass(unsafe_hash=True)
-class Array(DataType):
-    dims: tuple[int]
+class StaticArray(DataType):
+    dims: tuple[tuple[int, int]]
+    type: DataType
+
+
+@dataclass(unsafe_hash=True)
+class DynamicArray(DataType):
     type: DataType
 
 
@@ -93,8 +91,9 @@ def dispatch(name: str):
     # TODO: smarter
     kinds = {
         'integer': Integer,
-        'string': String,
         'real': Real,
         'char': Char,
+        'byte': Byte,
+        'boolean': Boolean,
     }
     return kinds[name]
