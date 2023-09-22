@@ -93,8 +93,25 @@ class ReadLn(MagicFunction):
 
     @classmethod
     def evaluate(cls, args, kinds, compiler):
-        ptr = compiler.string_pointer(format_io(kinds) + b'\n\00')
-        return compiler.builder.call(compiler.module.get_global('scanf'), [ptr, *compiler.visit_sequence(args, True)])
+        builder = compiler.builder
+        ptr = compiler.string_pointer(format_io(kinds) + b'\00')
+        builder.call(compiler.module.get_global('scanf'), [ptr, *compiler.visit_sequence(args, True)])
+        # ignore the rest of the line: while (getchar() != '\n') {} // ord('\n') == 10
+        check_block = builder.append_basic_block('check')
+        loop_block = builder.append_basic_block('loop')
+        end_block = builder.append_basic_block('end')
+        builder.branch(check_block)
+        # check
+        builder.position_at_end(check_block)
+        condition = builder.icmp_signed(
+            '!=', builder.call(compiler.module.get_global('getchar'), ()), ir.Constant(ir.IntType(8), 10)
+        )
+        builder.cbranch(condition, loop_block, end_block)
+        # loop
+        builder.position_at_end(loop_block)
+        builder.branch(check_block)
+        # exit
+        builder.position_at_end(end_block)
 
 
 class Chr(MagicFunction):
@@ -139,8 +156,12 @@ class Random(MagicFunction):
 
     @classmethod
     def evaluate(cls, args, kinds, compiler):
-        # TODO
-        return ir.Constant(ir.IntType(32), 0)
+        # rand() [% max]
+        value = compiler.builder.call(compiler.module.get_global('rand'), ())
+        if args:
+            # TODO: this won't give uniformly distributed numbers
+            return compiler.builder.srem(value, compiler.visit(args[0], False))
+        return value
 
 
 class Randomize(MagicFunction):
@@ -149,6 +170,12 @@ class Randomize(MagicFunction):
         if args:
             raise WrongType
         return types.Void
+
+    @classmethod
+    def evaluate(cls, args, kinds, compiler):
+        # srand(time(NULL));
+        time = compiler.builder.call(compiler.module.get_global('time'), [ir.Constant(ir.IntType(32), 0)])
+        compiler.builder.call(compiler.module.get_global('srand'), [time])
 
 
 @composed(b' '.join)

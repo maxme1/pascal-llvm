@@ -37,6 +37,9 @@ class Parser:
         statements = self._body()
 
         self.consume(TokenType.DOT)
+        if self.tokens:
+            raise ParseError(self.tokens[0])
+
         return Program(variables, tuple(prototypes), tuple(functions), statements)
 
     @composed(tuple)
@@ -257,8 +260,6 @@ class Parser:
                     target = GetItem(target, tuple(args))
 
                 case TokenType.DOT:
-                    # TODO: find out what's this
-                    self.consume(TokenType.OP, string='')
                     name = self.consume(TokenType.NAME).string
                     target = GetField(target, name)
 

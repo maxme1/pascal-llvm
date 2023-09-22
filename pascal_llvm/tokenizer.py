@@ -80,7 +80,7 @@ class TokenType(IntEnum):
     N_TOKENS = 64
 
 
-FIX_EXACT = ';', '(', ')', ',', ':', ':=', '[', ']', '^', '@', '|'
+FIX_EXACT = ';', '(', ')', ',', ':', ':=', '[', ']', '^', '@', '|', '.'
 
 
 def tokenize(text):
@@ -125,8 +125,11 @@ def tokenize(text):
         ):
             pass
 
+        elif not token.string:
+            pass
+
         # unpack floats
-        elif token.type == TokenType.NUMBER and token.string.startswith('.') or token.string.endswith('.'):
+        elif token.type == TokenType.NUMBER and (token.string.startswith('.') or token.string.endswith('.')):
             body = token.string
             split = (
                 token._replace(string='.', type=TokenType.DOT),

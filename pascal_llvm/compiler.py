@@ -32,6 +32,10 @@ class Compiler(Visitor):
         # external and builtins
         ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True), 'printf')
         ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True), 'scanf')
+        ir.Function(self.module, ir.FunctionType(ir.IntType(8), []), 'getchar')
+        ir.Function(self.module, ir.FunctionType(ir.IntType(32), []), 'rand')
+        ir.Function(self.module, ir.FunctionType(ir.VoidType(), [ir.IntType(32)]), 'srand')
+        ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(32)]), 'time')
 
     @property
     def builder(self) -> ir.IRBuilder:
