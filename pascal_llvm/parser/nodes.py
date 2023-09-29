@@ -89,12 +89,6 @@ class ArgDefinition(NamedTuple):
     type: types.DataType
 
 
-class Prototype(NamedTuple):
-    name: Name
-    args: tuple[ArgDefinition]
-    return_type: types.DataType
-
-
 @dataclass(unsafe_hash=True)
 class Function:
     name: Name
@@ -110,6 +104,5 @@ class Function:
 
 class Program(NamedTuple):
     variables: tuple[Definitions]
-    prototypes: tuple[Prototype]
     functions: tuple[Function]
     body: tuple[Any]

@@ -26,26 +26,22 @@ class Parser:
         self.consume(TokenType.SEMI)
 
         variables = self._variables()
-        functions, prototypes = [], []
-        while self.peek().string.lower() in ['function', 'procedure', 'external']:
-            if self.peek().string.lower() == 'external':
-                self.consume()
-                prototypes.append(self._prototype())
-            else:
-                functions.append(self._function())
+        functions = []
+        while self.peek().string.lower() in ('function', 'procedure'):
+            functions.append(self._function())
 
         statements = self._body()
 
         self.consume(TokenType.DOT)
         if self.tokens:
-            raise ParseError(self.tokens[0])
+            raise ParseError(self.tokens.peek())
 
-        return Program(variables, tuple(prototypes), tuple(functions), statements)
+        return Program(variables, tuple(functions), statements)
 
     @composed(tuple)
     def _variables(self):
         while self.consumed(TokenType.NAME, string='var'):
-            while self.peek().string.lower() not in ('var', 'function', 'procedure', 'external', 'begin'):
+            while self.peek().string.lower() not in ('var', 'function', 'procedure', 'begin'):
                 yield self._definition()
 
     def _prototype(self):
@@ -78,21 +74,20 @@ class Parser:
         else:
             ret = types.Void
         self.consume(TokenType.SEMI)
-        return Prototype(name, tuple(args), ret)
+        return name, tuple(args), ret
 
     def _function(self):
-        proto = self._prototype()
+        name, args, ret = self._prototype()
         variables = self._variables()
         body = self._body()
         self.consume(TokenType.SEMI)
-        return Function(proto.name, proto.args, variables, body, proto.return_type)
+        return Function(name, args, variables, body, ret)
 
     @composed(tuple)
     def _body(self):
         self.consume(TokenType.NAME, string='begin')
         while not self.matches(TokenType.NAME, string='end'):
             if self.matches(TokenType.NAME, string='begin'):
-                # TODO: is this ok?
                 yield from self._body()
             else:
                 yield self._statement()
@@ -215,12 +210,6 @@ class Parser:
         return For(name, start, stop, body)
 
     def _expression(self):
-        # TODO: for now this will be the FFI
-        if self.consumed(TokenType.VBAR):
-            name = Name('|' + self.consume(TokenType.NAME).string)
-            args = self._args()
-            return Call(name, args)
-
         return self._binary(MAX_PRIORITY)
 
     def _binary(self, priority):
@@ -294,7 +283,6 @@ class Parser:
                 return value
 
             case TokenType.NAME:
-                # TOdo: keywords?
                 name = Name(self.consume().string)
                 if self.matches(TokenType.LPAR):
                     return Call(name, self._args())
@@ -316,12 +304,9 @@ class Parser:
 
     # internals
     def consume(self, *types: TokenType, string: str | None = None) -> TokenInfo:
-        if types and self.peek().type not in types:
-            raise ParseError(self.peek(), types)
-        token = next(self.tokens)
-        if string is not None and token.string.lower() != string.lower():
-            raise ParseError(token, string)
-        return token
+        if not self.matches(*types, string=string):
+            raise ParseError(self.peek(), types, string)
+        return next(self.tokens)
 
     def consumed(self, *types: TokenType, string: str | None = None) -> bool:
         success = self.matches(*types, string=string)
