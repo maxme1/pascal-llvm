@@ -13,6 +13,8 @@ def instance(v: Type[DataType]) -> DataType:
 
 
 class DataType:
+    """ Base class for all data types """
+
     @property
     def family(self) -> tuple | None:
         for family in Ints, Floats:

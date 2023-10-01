@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import NamedTuple, Any
+from typing import Any
 
 from ..type_system import types
 
@@ -22,74 +22,87 @@ class Name:
     name: str
 
 
-class GetItem(NamedTuple):
+@unique
+class GetItem:
     target: Any
     args: tuple[Any]
 
 
-class GetField(NamedTuple):
+@unique
+class GetField:
     target: Any
     name: str
 
 
-class Dereference(NamedTuple):
+@unique
+class Dereference:
     target: Any
 
 
-class Assignment(NamedTuple):
-    target: Name | GetItem | GetField
-    value: Any
+@unique
+class Call:
+    target: Any
+    args: tuple[Any]
 
 
-class Unary(NamedTuple):
+@unique
+class Unary:
     op: str
     value: Any
 
 
-class Binary(NamedTuple):
+@unique
+class Binary:
     op: str
     left: Any
     right: Any
 
 
-class Call(NamedTuple):
-    name: Name
-    args: tuple[Any]
+@unique
+class Assignment:
+    target: Name | GetItem | GetField | Dereference
+    value: Any
 
 
-class Definitions(NamedTuple):
+@unique
+class Definitions:
     names: tuple[Name]
     type: types.DataType
 
 
-class ExpressionStatement(NamedTuple):
+@unique
+class ExpressionStatement:
     value: Any
 
 
-class If(NamedTuple):
+@unique
+class If:
     condition: Any
     then_: tuple[Any]
     else_: tuple[Any]
 
 
-class While(NamedTuple):
+@unique
+class While:
     condition: Any
     body: tuple[Any]
 
 
-class For(NamedTuple):
+@unique
+class For:
     name: Name
     start: Any
     stop: Any
     body: tuple[Any]
 
 
-class ArgDefinition(NamedTuple):
+@unique
+class ArgDefinition:
     name: Name
     type: types.DataType
 
 
-@dataclass(unsafe_hash=True)
+@unique
 class Function:
     name: Name
     args: tuple[ArgDefinition]
@@ -102,7 +115,8 @@ class Function:
         return types.Signature(tuple(x.type for x in self.args), self.return_type)
 
 
-class Program(NamedTuple):
+@unique
+class Program:
     variables: tuple[Definitions]
     functions: tuple[Function]
     body: tuple[Any]

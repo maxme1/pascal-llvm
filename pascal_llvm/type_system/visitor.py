@@ -62,9 +62,6 @@ class TypeSystem(Visitor):
         return 0
 
     def cast(self, node, kind: types.DataType, to: types.DataType):
-        if node == Const(value=6, type=types.SignedInt(bits=8)):
-            print()
-
         match self.can_cast(kind, to):
             case 0 | False:
                 raise WrongType(kind, to)
@@ -227,18 +224,18 @@ class TypeSystem(Visitor):
         return self.visit(node.value, expected, lvalue)
 
     def _call(self, node: Call, expected: types.DataType, lvalue: bool):
-        magic = MagicFunction.get(node.name.name)
+        magic = MagicFunction.get(node.target.name)
         if magic is not None:
             return magic.validate(node.args, self.visit)
 
         # get all the functions with this name
-        target = self._resolve_function(node.name)
+        target = self._resolve_function(node.target)
         if not isinstance(target, types.Function):
             raise WrongType(target)
 
         signature = self._dispatch(node.args, target.signatures, expected)
         # choose the right function
-        self._choose_signature(node.name, signature)
+        self._choose_signature(node.target, signature)
         return signature.return_type
 
     def _dispatch(self, args: Sequence, signatures: Sequence[types.Signature], expected: types.DataType):

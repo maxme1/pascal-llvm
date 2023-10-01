@@ -3,7 +3,8 @@ from operator import mul
 
 from llvmlite import ir
 
-from .type_system import types, TypeSystem, MagicFunction
+from .type_system.visitor import TypeSystem
+from .type_system import types, MagicFunction
 from .parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
     ExpressionStatement, GetField, Dereference
@@ -150,8 +151,8 @@ class Compiler(Visitor):
             self._allocate(ret, resolve(node.return_type))
 
         for arg, param in zip(func.args, node.args, strict=True):
-            name = param.name
-            arg.name = name.name
+            name = param.target
+            arg.target = name.target
             self._allocate(name, resolve(param.type), arg)
 
         for definitions in node.variables:
@@ -291,12 +292,12 @@ class Compiler(Visitor):
                 raise ValueError(x, node)
 
     def _call(self, node: Call, lvalue: bool):
-        magic = MagicFunction.get(node.name.name)
+        magic = MagicFunction.get(node.target.name)
         if magic is not None:
             return magic.evaluate(node.args, list(map(self._type, node.args)), self)
 
-        func = self.module.get_global(self._deduplicate(self._references[node.name]))
-        signature = self._references[node.name].signature
+        func = self.module.get_global(self._deduplicate(self._references[node.target]))
+        signature = self._references[node.target].signature
 
         args = []
         for arg, kind in zip(node.args, signature.args, strict=True):
@@ -339,7 +340,7 @@ class Compiler(Visitor):
         kind = self._type(node.target)
         if isinstance(kind, types.Reference):
             kind = kind.type
-        idx, = [i for i, field in enumerate(kind.fields) if field.name == node.name]
+        idx, = [i for i, field in enumerate(kind.fields) if field.target == node.name]
         ptr = self.builder.gep(
             ptr, [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), idx)]
         )

@@ -199,11 +199,11 @@ class Parser:
         return While(condition, body)
 
     def _for(self):
-        self.consume(TokenType.NAME, string='FOR')
+        self.consume(TokenType.NAME, string='for')
         name = Name(self.consume(TokenType.NAME).string)
         self.consume(TokenType.COLONEQUAL)
         start = self._expression()
-        self.consume(TokenType.NAME, string='TO')
+        self.consume(TokenType.NAME, string='to')
         stop = self._expression()
         self.consume(TokenType.NAME, string='do')
         body = self._flexible_body()
@@ -217,7 +217,7 @@ class Parser:
             return self._unary()
 
         left = self._binary(priority - 1)
-        while self.matches(TokenType.OP, TokenType.NAME) and self.peek().string in PRIORITIES:
+        while self.peek().string in PRIORITIES:
             op = self.peek().string
             current = PRIORITIES.get(op)
             # only consume the operation with the same priority
@@ -231,19 +231,17 @@ class Parser:
         return left
 
     def _unary(self):
-        # FIXME
-        if self.peek().string in ('@', 'not', '-'):
-            return Unary(self.consume().string, self._unary())
+        if self.peek().string.lower() in ('@', 'not', '-', '+'):
+            return Unary(self.consume().string.lower(), self._unary())
         return self._tail()
 
     def _tail(self):
         target = self._primary()
-        while self.matches(TokenType.LSQB, TokenType.DOT, TokenType.CIRCUMFLEX):
+        while self.matches(TokenType.LSQB, TokenType.DOT, TokenType.CIRCUMFLEX, TokenType.LPAR):
             match self.consume().type:
                 case TokenType.LSQB:
                     args = [self._expression()]
-                    while self.matches(TokenType.COMMA):
-                        self.consume()
+                    while self.consumed(TokenType.COMMA):
                         args.append(self._expression())
                     self.consume(TokenType.RSQB)
                     target = GetItem(target, tuple(args))
@@ -251,6 +249,15 @@ class Parser:
                 case TokenType.DOT:
                     name = self.consume(TokenType.NAME).string
                     target = GetField(target, name)
+
+                case TokenType.LPAR:
+                    args = []
+                    while not self.matches(TokenType.RPAR):
+                        if args:
+                            self.consume(TokenType.COMMA)
+                        args.append(self._expression())
+                    self.consume(TokenType.RPAR)
+                    target = Call(target, tuple(args))
 
                 case TokenType.CIRCUMFLEX:
                     target = Dereference(target)
@@ -283,24 +290,10 @@ class Parser:
                 return value
 
             case TokenType.NAME:
-                name = Name(self.consume().string)
-                if self.matches(TokenType.LPAR):
-                    return Call(name, self._args())
-                return name
+                return Name(self.consume().string)
 
             case _:
                 raise ParseError(self.peek())
-
-    def _args(self):
-        args = []
-        self.consume(TokenType.LPAR)
-        while not self.matches(TokenType.RPAR):
-            if args:
-                self.consume(TokenType.COMMA)
-            args.append(self._expression())
-
-        self.consume(TokenType.RPAR)
-        return tuple(args)
 
     # internals
     def consume(self, *types: TokenType, string: str | None = None) -> TokenInfo:
