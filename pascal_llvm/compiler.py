@@ -151,8 +151,8 @@ class Compiler(Visitor):
             self._allocate(ret, resolve(node.return_type))
 
         for arg, param in zip(func.args, node.args, strict=True):
-            name = param.target
-            arg.target = name.target
+            name = param.name
+            arg.name = name.name
             self._allocate(name, resolve(param.type), arg)
 
         for definitions in node.variables:
