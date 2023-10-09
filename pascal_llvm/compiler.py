@@ -24,7 +24,6 @@ class Compiler(Visitor):
         self._builders = []
 
         self._ts = ts
-        self._desugar = ts.desugar
         self._references = ts.references
         self._allocas = {}
         self._function_names = {}
@@ -61,7 +60,7 @@ class Compiler(Visitor):
 
     def _type(self, node):
         if node in self._ts.casting:
-            return self._ts.casting[node][1]
+            return self._ts.casting[node]
         return self._ts.types[node]
 
     def _cast(self, value, src: types.DataType, dst: types.DataType, lvalue: bool):
@@ -73,21 +72,25 @@ class Compiler(Visitor):
         if src == dst:
             return value
 
-        if src in types.Ints and dst in types.Floats:
-            return self.builder.sitofp(value, resolve(dst))
-
-        if src in types.Ints and dst in types.Ints:
-            return self.builder.sext(value, resolve(dst))
-
-        if isinstance(src, types.StaticArray) and isinstance(dst, types.DynamicArray):
-            return value
+        match src, dst:
+            case types.SignedInt(_), types.Floating(_):
+                return self.builder.sitofp(value, resolve(dst))
+            case types.SignedInt(_), types.SignedInt(_):
+                return self.builder.sext(value, resolve(dst))
+            case types.StaticArray(_), types.DynamicArray(_):
+                return value
+            case types.Nil, types.Pointer(_):
+                return value
 
         raise NotImplementedError(value, src, dst)
+
+    def before_visit(self, node, *args, **kwargs):
+        return self._ts.desugar.get(node, node)
 
     def after_visit(self, node, value, lvalue=None):
         if node in self._ts.casting:
             assert lvalue is not None
-            return self._cast(value, *self._ts.casting[node], lvalue)
+            return self._cast(value, self._ts.types[node], self._ts.casting[node], lvalue)
         return value
 
     # scope utils
@@ -340,7 +343,7 @@ class Compiler(Visitor):
         kind = self._type(node.target)
         if isinstance(kind, types.Reference):
             kind = kind.type
-        idx, = [i for i, field in enumerate(kind.fields) if field.target == node.name]
+        idx, = [i for i, field in enumerate(kind.fields) if field.name == node.name]
         ptr = self.builder.gep(
             ptr, [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), idx)]
         )
@@ -355,9 +358,6 @@ class Compiler(Visitor):
         return self.builder.load(ptr)
 
     def _name(self, node: Name, lvalue: bool):
-        if node in self._desugar:
-            return self.visit(self._desugar[node], lvalue)
-
         target = self._references[node]
         ptr = self._allocas[target]
         if lvalue:
@@ -368,15 +368,17 @@ class Compiler(Visitor):
 
     def _const(self, node: Const, lvalue: bool):
         # TODO: f32 doesn't work
-        kind = node.type
         value = node.value
-        if isinstance(kind, types.StaticArray) and kind.type == types.Char:
-            return self.string_pointer(value)
+        match node.type:
+            case types.StaticArray(dims, types.Char) if len(dims) == 1:
+                return self.string_pointer(value)
+            case types.Nil:
+                # FIXME
+                return ir.Constant(ir.PointerType(ir.IntType(32)), 0)
+            case types.SignedInt(_) | types.Floating(_) as kind:
+                return ir.Constant(resolve(kind), value)
 
-        if not isinstance(kind, (types.SignedInt, types.Floating)):
-            raise ValueError(value)
-
-        return ir.Constant(resolve(kind), value)
+        raise ValueError(value)
 
 
 def resolve(kind):

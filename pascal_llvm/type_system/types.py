@@ -1,105 +1,95 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Type, NamedTuple
+
+hashable = dataclass(unsafe_hash=True, repr=True)
 
 
 class WrongType(Exception):
     pass
 
 
-def instance(v: Type[DataType]) -> DataType:
-    return v()
-
-
 class DataType:
     """ Base class for all data types """
 
-    @property
-    def family(self) -> tuple | None:
-        for family in Ints, Floats:
-            if self in family:
-                return family
 
-
-@instance
-class Void(DataType):
+class VoidType(DataType):
     pass
 
 
-class Signature(NamedTuple):
-    args: tuple[DataType]
-    return_type: DataType
-
-
-@dataclass
-class Function(DataType):
-    signatures: tuple[Signature]
-
-
-@instance
-class Boolean(DataType):
+class NilType(DataType):
     pass
 
 
-@instance
-class Char(DataType):
+class BooleanType(DataType):
     pass
 
 
-@dataclass(unsafe_hash=True)
+class CharType(DataType):
+    pass
+
+
+@hashable
 class SignedInt(DataType):
     bits: int
 
 
-@dataclass(unsafe_hash=True)
+@hashable
 class Floating(DataType):
     bits: int
 
 
-# TODO: 32 and 64 is not always true
-Ints = Byte, Integer = SignedInt(8), SignedInt(32)
-Floats = Real, = Floating(64),
-
-
-@dataclass(unsafe_hash=True, repr=True)
+@hashable
 class Pointer(DataType):
     type: DataType
 
 
-@dataclass(unsafe_hash=True)
+@hashable
+class Reference(DataType):
+    type: DataType
+
+
+@hashable
 class StaticArray(DataType):
     dims: tuple[tuple[int, int]]
     type: DataType
 
 
-@dataclass(unsafe_hash=True)
+@hashable
 class DynamicArray(DataType):
     type: DataType
 
 
-class Field(NamedTuple):
+@hashable
+class Field:
     name: str
     type: DataType
 
 
-@dataclass(unsafe_hash=True, frozen=True)
+@hashable
 class Record(DataType):
     fields: tuple[Field]
 
 
-@dataclass(unsafe_hash=True)
-class Reference(DataType):
-    type: DataType
+@hashable
+class Signature:
+    args: tuple[DataType]
+    return_type: DataType
 
 
-def dispatch(name: str):
-    # TODO: smarter
-    kinds = {
-        'integer': Integer,
-        'real': Real,
-        'char': Char,
-        'byte': Byte,
-        'boolean': Boolean,
-    }
-    return kinds[name]
+@hashable
+class Function(DataType):
+    signatures: tuple[Signature]
+
+
+# TODO: 32 and 64 is not always true
+Ints = Byte, Integer = SignedInt(8), SignedInt(32)
+Floats = Real, = Floating(64),
+Void, Boolean, Char, Nil = VoidType(), BooleanType(), CharType(), NilType()
+TYPE_NAMES = {
+    'integer': Integer,
+    'real': Real,
+    'char': Char,
+    'byte': Byte,
+    'boolean': Boolean,
+}

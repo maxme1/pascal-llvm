@@ -1,3 +1,4 @@
+from collections import defaultdict
 from contextlib import contextmanager
 from typing import Sequence
 
@@ -24,94 +25,69 @@ class TypeSystem(Visitor):
     def __init__(self):
         self._scopes = []
         self._func_return_names = []
-        self._signatures = {}
         self.types = {}
         self.casting = {}
         self.references = {}
         self.desugar = {}
 
-    def after_visit(self, node, value, expected=None, lvalue=None):
-        if value is not None:
-            self.types[node] = value
+    def after_visit(self, node, kind, expected=None, lvalue=None):
+        self.types[node] = kind
         if expected is not None:
-            self.cast(node, value, expected)
-        return value
+            if not self.can_cast(kind, expected):
+                raise WrongType(kind, expected)
 
-    # TODO: better way to return 3 states
-    def can_cast(self, kind: types.DataType, to: types.DataType) -> int:
-        if to is None or kind == to:
-            return 2
-
-        match (kind, to):
-            case (types.Reference(src), _):
-                return bool(self.can_cast(src, to))
-            case (_, types.Reference(dst)):
-                return bool(self.can_cast(kind, dst))
-            case (types.StaticArray(dims, src), types.DynamicArray(dst)):
-                return bool(len(dims) == 1 and self.can_cast(src, dst))
-
-        # FIXME
-        if not kind.family or not to.family:
-            return 0
-
-        family = kind.family
-        if family == to.family:
-            return int(family.index(kind) < family.index(to))
-        if family == types.Ints and to.family == types.Floats:
-            return 1
-        return 0
-
-    def cast(self, node, kind: types.DataType, to: types.DataType):
-        match self.can_cast(kind, to):
-            case 0 | False:
-                raise WrongType(kind, to)
-            case 1 | True:
-                self.casting[node] = kind, to
-                return to
-            case 2:
+            if kind == expected:
                 self.casting.pop(node, None)
-                return kind
-            case x:
-                raise ValueError(x)
+            else:
+                self.casting[node] = expected
+                kind = expected
+
+        return kind
+
+    def can_cast(self, kind: types.DataType, to: types.DataType) -> bool:
+        if to is None or kind == to:
+            return True
+
+        match kind, to:
+            case types.Reference(src), _:
+                return self.can_cast(src, to)
+            case _, types.Reference(dst):
+                return self.can_cast(kind, dst)
+            case types.StaticArray(dims, src), types.DynamicArray(dst):
+                return len(dims) == 1 and src == dst
+            case types.SignedInt(_), types.Floating(_):
+                return True
+            case types.Nil, types.Pointer(_):
+                return True
+
+        for family in types.SignedInt, types.Floating:
+            if isinstance(kind, family) and isinstance(to, family):
+                return kind.bits <= to.bits
+
+        return False
 
     # scope utils
 
-    def _resolve_function(self, name: Name):
-        return self._scopes[0][name.name.lower()]
-
-    def _choose_signature(self, name: Name, signature):
-        self.references[name] = self._signatures[name.name.lower(), signature]
-
-    def _store_signature(self, node: Function, signature):
-        scope, = self._scopes
-        name = node.name.name.lower()
-        if name not in scope:
-            scope[name] = types.Function(())
-        self.types[name] = scope[name] = types.Function((*scope[name].signatures, signature))
-        self._signatures[name, signature] = node
-
     def _store_value(self, name: Name, kind: types.DataType):
-        assert name not in self._scopes[-1]
-        self._scopes[-1][name.name.lower()] = name, kind
+        self._store(name.normalized, kind, name)
         self.types[name] = kind
 
-    def _resolve_value(self, name: Name):
-        for scope in reversed(self._scopes):
-            lower = name.name.lower()
-            if lower in scope:
-                value = scope[lower]
-                # func
-                if not isinstance(value, tuple):
-                    return value
+    def _store(self, name: str, kind: types.DataType, payload):
+        assert name not in self._scopes[-1]
+        self._scopes[-1][name] = kind, payload
 
-                node, kind = value
-                self.references[name] = node
-                return kind
+    def _resolve(self, name: str):
+        for scope in reversed(self._scopes):
+            if name in scope:
+                return scope[name]
 
         raise KeyError(name)
 
+    def _bind(self, source, destination):
+        self.references[source] = destination
+
     @contextmanager
-    def _new_scope(self):
+    def _enter(self):
         self._scopes.append({})
         yield
         self._scopes.pop()
@@ -127,29 +103,31 @@ class TypeSystem(Visitor):
         self.visit(node.value, expected=kind, lvalue=False)
 
     def _program(self, node: Program):
-        with self._new_scope():
-            # FIXME
+        with self._enter():
+            # magic
             for func in MagicFunction.all():
-                func = Function(Name(func.name), None, None, None, None)
-                self._store_signature(func, None)
+                self._store(func.name, func(), None)
 
+            # vars
             for definitions in node.variables:
                 for name in definitions.names:
                     self._store_value(name, definitions.type)
 
+            # functions
+            functions = defaultdict(list)
             for func in node.functions:
-                self._store_signature(func, func.signature)
+                functions[func.name.normalized].append(func)
+            for name, funcs in functions.items():
+                funcs = {f.signature: f for f in funcs}
+                self._store(name, types.Function(tuple(funcs)), funcs)
 
             self.visit_sequence(node.functions)
             self.visit_sequence(node.body)
 
     def _function(self, node: Function):
-        with self._new_scope():
-            if node.return_type == types.Void:
-                self._func_return_names.append((None, None))
-            else:
-                self._func_return_names.append((node.name, node.return_type))
-                self.types[node.name] = node.return_type
+        with self._enter():
+            self._func_return_names.append((node.return_type, node.name))
+            self.types[node.name] = node.return_type
 
             for arg in node.args:
                 self._store_value(arg.name, arg.type)
@@ -173,8 +151,8 @@ class TypeSystem(Visitor):
         self.visit_sequence(node.body)
 
     def _for(self, node: For):
-        counter = self._resolve_value(node.name)
-        if counter not in types.Ints:
+        counter = self.visit(node.name, expected=None, lvalue=True)
+        if not isinstance(counter, types.SignedInt):
             raise WrongType(counter)
 
         self.visit(node.start, expected=counter, lvalue=False)
@@ -187,33 +165,7 @@ class TypeSystem(Visitor):
     # expressions
 
     def _binary(self, node: Binary, expected: types.DataType, lvalue: bool):
-        # TODO: global
-        numeric = [*types.Ints, *types.Floats]
-        homogeneous = {
-            '+': numeric,
-            '*': numeric,
-            '-': numeric,
-            '/': numeric,
-            'and': [types.Boolean],
-            'or': [types.Boolean],
-        }
-        boolean = {
-            '=': numeric,
-            '<': numeric,
-            '<=': numeric,
-            '>': numeric,
-            '>=': numeric,
-            '<>': numeric,
-        }
-        signatures = {
-            k: [types.Signature([v, v], v) for v in vs]
-            for k, vs in homogeneous.items()
-        }
-        signatures.update({
-            k: [types.Signature([v, v], types.Boolean) for v in vs]
-            for k, vs in boolean.items()
-        })
-        return self._dispatch([node.left, node.right], signatures[node.op], expected).return_type
+        return self._dispatch([node.left, node.right], BINARY_SIGNATURES[node.op], expected).return_type
 
     def _unary(self, node: Unary, expected: types.DataType, lvalue: bool):
         if node.op == '@':
@@ -224,18 +176,20 @@ class TypeSystem(Visitor):
         return self.visit(node.value, expected, lvalue)
 
     def _call(self, node: Call, expected: types.DataType, lvalue: bool):
-        magic = MagicFunction.get(node.target.name)
-        if magic is not None:
-            return magic.validate(node.args, self.visit)
+        if not isinstance(node.target, Name):
+            raise WrongType(node)
 
         # get all the functions with this name
-        target = self._resolve_function(node.target)
-        if not isinstance(target, types.Function):
-            raise WrongType(target)
+        kind, targets = self._resolve(node.target.normalized)
+        if isinstance(kind, MagicFunction):
+            return kind.validate(node.args, self.visit)
 
-        signature = self._dispatch(node.args, target.signatures, expected)
+        if not isinstance(kind, types.Function):
+            raise WrongType(kind)
+
+        signature = self._dispatch(node.args, kind.signatures, expected)
         # choose the right function
-        self._choose_signature(node.target, signature)
+        self._bind(node.target, targets[signature])
         return signature.return_type
 
     def _dispatch(self, args: Sequence, signatures: Sequence[types.Signature], expected: types.DataType):
@@ -263,19 +217,22 @@ class TypeSystem(Visitor):
         target = self.visit(node.target, expected=None, lvalue=True)
         if isinstance(target, types.Reference):
             target = target.type
-        if not isinstance(target, types.StaticArray):
+        if not isinstance(target, (types.StaticArray, types.DynamicArray)):
             raise WrongType(target)
-        if len(node.args) != len(target.dims):
+
+        ndims = len(target.dims) if isinstance(target, types.StaticArray) else 1
+        if len(node.args) != ndims:
             raise WrongType(target, node.args)
-        # TODO
+
         args = self.visit_sequence(node.args, expected=types.Integer, lvalue=False)
-        if not all(_unwrap(x) in types.Ints for x in args):
+        args = [x.type if isinstance(x, types.Reference) else x for x in args]
+        if not all(isinstance(x, types.SignedInt) for x in args):
             raise WrongType(node)
 
         return target.type
 
     def _get_field(self, node: GetField, expected: types.DataType, lvalue: bool):
-        target = self.visit(node.target, expected=None, lvalue=True)
+        target = self.visit(node.target, expected=None, lvalue=False)
         if isinstance(target, types.Reference):
             target = target.type
         if not isinstance(target, types.Record):
@@ -288,35 +245,53 @@ class TypeSystem(Visitor):
         raise WrongType(target, node.name)
 
     def _dereference(self, node: Dereference, expected: types.DataType, lvalue: bool):
-        target = self.visit(node.target, expected, lvalue)
-        if not isinstance(target, types.Pointer):
-            raise WrongType(target)
+        target = self.visit(node.target, types.Pointer(expected), lvalue)
         return target.type
 
     def _name(self, node: Name, expected: types.DataType, lvalue: bool):
         # assignment to the function's name inside a function is definition of a return value
-        if (
-                lvalue and self._func_return_names and
-                self._func_return_names[-1][0] and node.name == self._func_return_names[-1][0].name
-        ):
-            ref, kind = self._func_return_names[-1]
-            self.references[node] = ref
-            return kind
+        if lvalue and self._func_return_names:
+            kind, target = self._func_return_names[-1]
+            if kind != types.Void and target.name == node.name:
+                self._bind(node, target)
+                return kind
 
-        reference = self._resolve_value(node)
-        if isinstance(reference, types.Function):
+        kind, target = self._resolve(node.normalized)
+        if isinstance(kind, (types.Function, MagicFunction)):
             self.desugar[node] = new = Call(node, ())
             return self._call(new, expected, lvalue)
-        return reference
 
-    @staticmethod
-    def _const(node: Const, expected: types.DataType, lvalue: bool):
+        self._bind(node, target)
+        return kind
+
+    def _const(self, node: Const, expected: types.DataType, lvalue: bool):
         if lvalue:
             raise WrongType(node)
         return node.type
 
 
-def _unwrap(x):
-    if isinstance(x, types.Reference):
-        return x.type
-    return x
+_numeric = [*types.Ints, *types.Floats]
+_homogeneous = {
+    '+': _numeric,
+    '*': _numeric,
+    '-': _numeric,
+    '/': _numeric,
+    'and': [types.Boolean],
+    'or': [types.Boolean],
+}
+_boolean = {
+    '=': _numeric,
+    '<': _numeric,
+    '<=': _numeric,
+    '>': _numeric,
+    '>=': _numeric,
+    '<>': _numeric,
+}
+BINARY_SIGNATURES = {
+    k: [types.Signature((v, v), v) for v in vs]
+    for k, vs in _homogeneous.items()
+}
+BINARY_SIGNATURES.update({
+    k: [types.Signature((v, v), types.Boolean) for v in vs]
+    for k, vs in _boolean.items()
+})

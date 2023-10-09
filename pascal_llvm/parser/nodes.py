@@ -21,6 +21,10 @@ class Const:
 class Name:
     name: str
 
+    @property
+    def normalized(self):
+        return self.name.lower()
+
 
 @unique
 class GetItem:

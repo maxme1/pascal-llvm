@@ -144,7 +144,7 @@ class Parser:
             return types.Record(tuple(fields))
 
         kind = self.consume(TokenType.NAME).string.lower()
-        return types.dispatch(kind)
+        return types.TYPE_NAMES[kind]
 
     def _int(self):
         neg = self.consumed(TokenType.OP, string='-')
@@ -290,7 +290,14 @@ class Parser:
                 return value
 
             case TokenType.NAME:
-                return Name(self.consume().string)
+                name = self.consume().string
+                match name.lower():
+                    case 'true' | 'false' as x:
+                        return Const(x == 'true', types.Boolean)
+                    case 'nil':
+                        return Const(None, types.Nil)
+
+                return Name(name)
 
             case _:
                 raise ParseError(self.peek())
