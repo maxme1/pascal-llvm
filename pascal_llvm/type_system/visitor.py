@@ -4,7 +4,7 @@ from typing import Sequence
 
 from . import types
 from .types import WrongType
-from .magic import MagicFunction
+from .magic import MagicFunction, MAGIC_FUNCTIONS
 from ..visitor import Visitor
 from ..parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
@@ -105,8 +105,8 @@ class TypeSystem(Visitor):
     def _program(self, node: Program):
         with self._enter():
             # magic
-            for func in MagicFunction.all():
-                self._store(func.name, func(), None)
+            for name, magic in MAGIC_FUNCTIONS.items():
+                self._store(name, magic(), None)
 
             # vars
             for definitions in node.variables:
@@ -204,7 +204,7 @@ class TypeSystem(Visitor):
                     if isinstance(kind, types.Reference) and not isinstance(arg, Name):
                         raise WrongType('Only variables can be mutable arguments')
 
-                    self.visit(arg, expected=kind, lvalue=False)
+                    self.visit(arg, expected=kind, lvalue=isinstance(kind, types.Reference))
 
             except WrongType:
                 continue

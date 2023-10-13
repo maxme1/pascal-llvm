@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Type
+from abc import ABC, abstractmethod
 
 from jboc import composed
 from llvmlite import ir
@@ -9,32 +9,29 @@ from . import types
 from .types import WrongType
 
 MAGIC_FUNCTIONS = {}
+FFI = {
+    'printf': ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True),
+    'scanf': ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True),
+    'getchar': ir.FunctionType(ir.IntType(8), []),
+    'rand': ir.FunctionType(ir.IntType(32), []),
+    'srand': ir.FunctionType(ir.VoidType(), [ir.IntType(32)]),
+    'time': ir.FunctionType(ir.IntType(32), [ir.IntType(32)]),
+}
 
 
-class MagicFunction:
+class MagicFunction(ABC):
     @classmethod
+    @abstractmethod
     def validate(cls, args, visit) -> types.DataType:
         pass
 
     @classmethod
+    @abstractmethod
     def evaluate(cls, args, kinds, compiler):
         pass
 
-    @classmethod
-    @property
-    def name(cls):
-        return cls.__name__.lower()
-
-    @classmethod
-    def get(cls, name: str) -> Type[MagicFunction]:
-        return MAGIC_FUNCTIONS.get(name.lower())
-
-    @classmethod
-    def all(cls):
-        return MAGIC_FUNCTIONS.values()
-
     def __init_subclass__(cls, **kwargs):
-        name = cls.name
+        name = cls.__name__.lower()
         assert name not in MAGIC_FUNCTIONS
         MAGIC_FUNCTIONS[name] = cls
 

@@ -1,10 +1,12 @@
+from contextlib import contextmanager
 from functools import reduce
 from operator import mul
 
 from llvmlite import ir
 
+from .type_system.magic import FFI, MAGIC_FUNCTIONS
 from .type_system.visitor import TypeSystem
-from .type_system import types, MagicFunction
+from .type_system import types
 from .parser import (
     Program, Binary, Call, Const, Assignment, Name, If, Unary, For, GetItem, While, Function,
     ExpressionStatement, GetField, Dereference
@@ -30,12 +32,8 @@ class Compiler(Visitor):
         self._string_idx = 0
 
         # external and builtins
-        ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True), 'printf')
-        ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(8).as_pointer()], True), 'scanf')
-        ir.Function(self.module, ir.FunctionType(ir.IntType(8), []), 'getchar')
-        ir.Function(self.module, ir.FunctionType(ir.IntType(32), []), 'rand')
-        ir.Function(self.module, ir.FunctionType(ir.VoidType(), [ir.IntType(32)]), 'srand')
-        ir.Function(self.module, ir.FunctionType(ir.IntType(32), [ir.IntType(32)]), 'time')
+        for name, kind in FFI.items():
+            ir.Function(self.module, kind, name)
 
     @property
     def builder(self) -> ir.IRBuilder:
@@ -50,6 +48,7 @@ class Compiler(Visitor):
     def string_pointer(self, value: bytes):
         kind = ir.ArrayType(ir.IntType(8), len(value))
         global_string = ir.GlobalVariable(self.module, kind, name=f'string.{self._string_idx}.global')
+        global_string.global_constant = True
         global_string.initializer = ir.Constant(kind, [ir.Constant(ir.IntType(8), x) for x in value])
         self._string_idx += 1
         return self.builder.gep(
@@ -95,9 +94,6 @@ class Compiler(Visitor):
 
     # scope utils
 
-    def _access(self, name: Name):
-        return self.builder.load(self._allocas[self._references[name]])
-
     def _assign(self, name: Name, value):
         target = self._references[name]
         ptr = self._allocas[target]
@@ -106,14 +102,15 @@ class Compiler(Visitor):
         self.builder.store(value, ptr)
 
     def _allocate(self, name: Name, kind: ir.Type, initial=None):
-        self._allocas[name] = self.builder.alloca(kind, name=name.name)
+        self._allocas[name] = self.builder.alloca(kind, name=name.normalized)
         if initial is not None:
             self.builder.store(initial, self._allocas[name])
 
-    def _allocate_global(self, name: Name, kind: ir.Type):
-        var = ir.GlobalVariable(self.module, kind, name=name.name)
-        var.linkage = 'internal'
-        self._allocas[name] = var
+    @contextmanager
+    def _enter(self, func):
+        self._builders.append(ir.IRBuilder(func.append_basic_block()))
+        yield
+        self._builders.pop()
 
     # scope modification
 
@@ -126,50 +123,46 @@ class Compiler(Visitor):
         self.builder.store(value, ptr)
 
     def _program(self, node: Program):
-        main = ir.Function(self.module, ir.FunctionType(ir.VoidType(), ()), '.main')
-        self._builders.append(ir.IRBuilder(main.append_basic_block()))
-
         for definitions in node.variables:
             for name in definitions.names:
-                self._allocate_global(name, resolve(definitions.type))
+                var = ir.GlobalVariable(self.module, resolve(definitions.type), name=name.normalized)
+                var.linkage = 'private'
+                self._allocas[name] = var
 
         for func in node.functions:
             ir.Function(
                 self.module, ir.FunctionType(resolve(func.return_type), [resolve(arg.type) for arg in func.args]),
                 self._deduplicate(func),
             )
-
         self.visit_sequence(node.functions)
-        self.visit_sequence(node.body)
-        self.builder.ret_void()
 
-        self._builders.pop()
+        main = ir.Function(self.module, ir.FunctionType(ir.VoidType(), ()), '.main')
+        with self._enter(main):
+            self.visit_sequence(node.body)
+            self.builder.ret_void()
 
     def _function(self, node: Function):
         ret = node.name
         func = self.module.get_global(self._deduplicate(node))
-        self._builders.append(ir.IRBuilder(func.append_basic_block()))
+        with self._enter(func):
+            if node.return_type != types.Void:
+                self._allocate(ret, resolve(node.return_type))
 
-        if node.return_type != types.Void:
-            self._allocate(ret, resolve(node.return_type))
+            for arg, param in zip(func.args, node.args, strict=True):
+                name = param.name
+                arg.name = name.normalized
+                self._allocate(name, resolve(param.type), arg)
 
-        for arg, param in zip(func.args, node.args, strict=True):
-            name = param.name
-            arg.name = name.name
-            self._allocate(name, resolve(param.type), arg)
+            for definitions in node.variables:
+                for name in definitions.names:
+                    self._allocate(name, resolve(definitions.type))
 
-        for definitions in node.variables:
-            for name in definitions.names:
-                self._allocate(name, resolve(definitions.type))
+            self.visit_sequence(node.body)
 
-        self.visit_sequence(node.body)
-
-        if node.return_type != types.Void:
-            self.builder.ret(self.builder.load(self._allocas[ret]))
-        else:
-            self.builder.ret_void()
-
-        self._builders.pop()
+            if node.return_type != types.Void:
+                self.builder.ret(self.builder.load(self._allocas[ret]))
+            else:
+                self.builder.ret_void()
 
     # statements
 
@@ -223,16 +216,16 @@ class Compiler(Visitor):
 
         # check
         self.builder.position_at_end(check_block)
-        # TODO: type
-        condition = self.builder.icmp_signed('<=', self._access(name), stop, 'for-condition')
+        counter = self.visit(name, lvalue=False)
+        condition = self.builder.icmp_signed('<=', counter, stop, 'for-condition')
         self.builder.cbranch(condition, loop_block, end_block)
 
         # loop
         self.builder.position_at_end(loop_block)
         self.visit_sequence(node.body)
         # update
-        # TODO: type
-        self._assign(name, self.builder.add(self._access(name), ir.Constant(resolve(types.Integer), 1), 'increment'))
+        increment = self.builder.add(counter, ir.Constant(resolve(self._type(name)), 1), 'increment')
+        self._assign(name, increment)
         self.builder.branch(check_block)
 
         # exit
@@ -295,29 +288,28 @@ class Compiler(Visitor):
                 raise ValueError(x, node)
 
     def _call(self, node: Call, lvalue: bool):
-        magic = MagicFunction.get(node.target.name)
+        magic = MAGIC_FUNCTIONS.get(node.target.normalized)
         if magic is not None:
             return magic.evaluate(node.args, list(map(self._type, node.args)), self)
 
-        func = self.module.get_global(self._deduplicate(self._references[node.target]))
-        signature = self._references[node.target].signature
+        target = self._references[node.target]
+        func = self.module.get_global(self._deduplicate(target))
+        signature = target.signature
 
         args = []
         for arg, kind in zip(node.args, signature.args, strict=True):
             # FIXME
             if isinstance(kind, types.Reference):
-                assert isinstance(arg, Name)
                 value = self._allocas[self._references[arg]]
             else:
-                value = self.visit(arg, False)
+                value = self.visit(arg, lvalue=False)
             args.append(value)
 
         return self.builder.call(func, args)
 
     def _get_item(self, node: GetItem, lvalue: bool):
         # we always want a pointer from the parent
-        ptr = self.visit(node.target, True)
-        # TODO: desugar this in the type system?
+        ptr = self.visit(node.target, lvalue=True)
         stride = 1
         dims = self._type(node.target).dims
         idx = ir.Constant(ir.IntType(32), 0)
@@ -389,8 +381,7 @@ def resolve(kind):
             return ir.IntType(8)
         case types.SignedInt(bits):
             return ir.IntType(bits)
-        case types.Floating(bits):
-            assert bits == 64
+        case types.Floating(64):
             return ir.DoubleType()
         case types.Reference(kind) | types.Pointer(kind) | types.DynamicArray(kind):
             return ir.PointerType(resolve(kind))
